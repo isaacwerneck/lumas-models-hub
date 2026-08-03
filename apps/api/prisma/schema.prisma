@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CHATTER
+  MANAGER
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+enum PaymentStatus {
+  PENDING
+  CHATTER_CONFIRMED
+  PAID
+  FORCED_PAID
+}
+
+enum AuditAction {
+  PAYMENT_CONFIRMED
+  PAYMENT_FORCED
+  CHATTER_MODEL_TAGS_UPDATED
+}
+
+model User {
+  id                  String            @id @default(cuid())
+  username            String            @unique
+  displayName         String
+  passwordHash        String
+  role                Role
+  isActive            Boolean           @default(true)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  chatterModelTags    ChatterModelTag[] @relation("ChatterTags")
+  shifts              Shift[]           @relation("ChatterShifts")
+  sentMessages        ChatMessage[]     @relation("MessageSender")
+  refreshSessions     RefreshSession[]
+  payouts             WeeklyPayout[]    @relation("PayoutOwner")
+  paidPayouts         WeeklyPayout[]    @relation("PayoutPaidBy")
+  forcedPaidPayouts   WeeklyPayout[]    @relation("PayoutForcedBy")
+  auditEntries        AuditLog[]        @relation("AuditActor")
+
+  @@index([role])
+}
+
+model ModelTag {
+  id               String            @id @default(cuid())
+  name             String            @unique
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  chatterLinks     ChatterModelTag[]
+  shifts           Shift[]
+  messages         ChatMessage[]
+}
+
+model ChatterModelTag {
+  id               String   @id @default(cuid())
+  chatterId        String
+  modelTagId       String
+  createdAt        DateTime @default(now())
+
+  chatter          User     @relation("ChatterTags", fields: [chatterId], references: [id], onDelete: Cascade)
+  modelTag         ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Cascade)
+
+  @@unique([chatterId, modelTagId])
+  @@index([modelTagId])
+}
+
+model Shift {
+  id                   String      @id @default(cuid())
+  chatterId            String
+  modelTagId           String
+  status               ShiftStatus @default(OPEN)
+  startedAt            DateTime
+  endedAt              DateTime?
+
+  startImageUrl        String
+  startOcrRawText      String?
+  startOcrConfidence   Decimal?    @db.Decimal(5, 4)
+  startValueCents      Int
+  startValueConfirmedAt DateTime?
+
+  endImageUrl          String?
+  endOcrRawText        String?
+  endOcrConfidence     Decimal?    @db.Decimal(5, 4)
+  endValueCents        Int?
+  endValueConfirmedAt  DateTime?
+
+  grossAmountCents     Int?
+  commissionDivisor    Int?
+  payoutAmountCents    Int?
+  negativeJustification String?
+
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  chatter              User        @relation("ChatterShifts", fields: [chatterId], references: [id], onDelete: Restrict)
+  modelTag             ModelTag    @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
+
+  @@index([chatterId, startedAt])
+  @@index([modelTagId, status])
+}
+
+model WeeklyPayout {
+  id                   String        @id @default(cuid())
+  chatterId            String
+  weekStartDate        DateTime
+  weekEndDate          DateTime
+  status               PaymentStatus @default(PENDING)
+
+  weekGrossCents       Int           @default(0)
+  weekPayoutCents      Int           @default(0)
+  lifetimePaidCents    Int           @default(0)
+
+  chatterConfirmedAt   DateTime?
+  paidAt               DateTime?
+  paidById             String?
+  forcedById           String?
+
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  chatter              User          @relation("PayoutOwner", fields: [chatterId], references: [id], onDelete: Restrict)
+  paidBy               User?         @relation("PayoutPaidBy", fields: [paidById], references: [id], onDelete: SetNull)
+  forcedBy             User?         @relation("PayoutForcedBy", fields: [forcedById], references: [id], onDelete: SetNull)
+
+  @@unique([chatterId, weekStartDate])
+  @@index([status, weekStartDate])
+}
+
+model ChatMessage {
+  id               String   @id @default(cuid())
+  modelTagId       String
+  senderId         String
+  content          String
+  createdAt        DateTime @default(now())
+
+  modelTag         ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
+  sender           User     @relation("MessageSender", fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([modelTagId, createdAt])
+}
+
+model RefreshSession {
+  id               String   @id @default(cuid())
+  userId           String
+  tokenHash        String   @unique
+  expiresAt        DateTime
+  createdAt        DateTime @default(now())
+  revokedAt        DateTime?
+  replacedByTokenHash String?
+
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model AuditLog {
+  id               String      @id @default(cuid())
+  actorId          String
+  action           AuditAction
+  targetType       String
+  targetId         String?
+  metadata         Json?
+  createdAt        DateTime    @default(now())
+
+  actor            User        @relation("AuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([action, createdAt])
+  @@index([targetType, targetId])
+}

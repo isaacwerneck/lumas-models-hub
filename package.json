@@ -1,0 +1,14 @@
+{
+  "name": "lumasmodels-hub",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @lumas/api",
+    "build:api": "npm run build --workspace @lumas/api",
+    "prisma:migrate": "npm run prisma:migrate --workspace @lumas/api",
+    "prisma:seed": "npm run prisma:seed --workspace @lumas/api"
+  }
+}
