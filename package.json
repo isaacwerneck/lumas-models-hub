@@ -7,7 +7,9 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @lumas/api",
+    "dev:web": "npm run dev --workspace web",
     "build:api": "npm run build --workspace @lumas/api",
+    "build:web": "npm run build --workspace web",
     "prisma:migrate": "npm run prisma:migrate --workspace @lumas/api",
     "prisma:seed": "npm run prisma:seed --workspace @lumas/api"
   }

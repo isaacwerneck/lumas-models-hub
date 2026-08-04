@@ -1,0 +1,424 @@
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap");
+
+:root {
+  --bg: #0d0210;
+  --panel: #1a0a24;
+  --panel-2: #3a0a4a;
+  --primary: #f700b0;
+  --accent: #d4a94c;
+  --text: #ffffff;
+  --text-soft: #b8a8c0;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Sora", sans-serif;
+  background:
+    radial-gradient(circle at 20% 8%, rgba(247, 0, 176, 0.18), transparent 28%),
+    radial-gradient(circle at 88% 16%, rgba(212, 169, 76, 0.08), transparent 35%),
+    var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  background: #12071b;
+  color: var(--text);
+  border: 1px solid #56376a;
+  border-radius: var(--radius);
+  padding: 0.7rem 0.8rem;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(247, 0, 176, 0.2);
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  border-radius: var(--radius);
+}
+
+.primary-button {
+  background: var(--primary);
+  color: #fff;
+  padding: 0.72rem 1rem;
+  font-weight: 600;
+}
+
+.secondary-button {
+  background: transparent;
+  border: 1px solid #7f5e92;
+  color: var(--text-soft);
+  padding: 0.6rem 0.9rem;
+}
+
+.screen-center {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid #5e3b75;
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: grid;
+  gap: 0.95rem;
+}
+
+.login-card h1 {
+  font-size: 1.5rem;
+}
+
+.login-logo {
+  width: 100px;
+  justify-self: center;
+}
+
+.app-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: #120519;
+  border-right: 1px solid #41294f;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.menu {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.menu-link {
+  text-decoration: none;
+  color: var(--text-soft);
+  background: transparent;
+  padding: 0.65rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+
+.menu-link.active {
+  color: #fff;
+  border-color: #6e4a84;
+  background: #241032;
+}
+
+.main-panel {
+  padding: 1rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.topbar {
+  background: var(--panel-2);
+  border: 1px solid #6d3a84;
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+}
+
+.brand-zone {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.brand-logo {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+}
+
+.brand-title {
+  font-size: 1.35rem;
+}
+
+.brand-subtitle {
+  color: var(--text-soft);
+  font-size: 0.9rem;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: 1fr 330px;
+  gap: 1rem;
+}
+
+.content-area {
+  display: grid;
+  gap: 1rem;
+}
+
+.dotart-card {
+  background: var(--panel);
+  border: 1px solid #4d2c61;
+  border-radius: 12px;
+  padding: 0.8rem;
+}
+
+.dotart-card h3 {
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+
+.dotart-card pre {
+  margin: 0;
+  font-family: "Space Mono", monospace;
+  color: #ccb8da;
+  font-size: 0.38rem;
+  line-height: 1.07;
+  max-height: 620px;
+  overflow: auto;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid #4f2f64;
+  border-radius: 12px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.stack-gap {
+  display: grid;
+  gap: 1rem;
+}
+
+.form-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.kpi-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.kpi-grid div {
+  background: #261135;
+  border: 1px solid #68457e;
+  border-radius: 10px;
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.kpi-grid strong {
+  color: var(--primary);
+  font-size: 1.1rem;
+}
+
+.table-card {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.6rem 0.35rem;
+  border-bottom: 1px solid #432c55;
+}
+
+th {
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.actions-cell {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.chat-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 1rem;
+}
+
+.room-list {
+  align-content: start;
+}
+
+.room-button {
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  background: #21102f;
+  color: #decde8;
+  border: 1px solid #5f3f73;
+}
+
+.room-button.active {
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.chat-box {
+  min-height: 520px;
+}
+
+.messages {
+  min-height: 360px;
+  max-height: 460px;
+  overflow: auto;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.message-item {
+  background: #251336;
+  border: 1px solid #5a3d6f;
+  border-radius: 9px;
+  padding: 0.5rem 0.6rem;
+}
+
+.message-item .meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
+.message-item p {
+  margin-top: 0.35rem;
+}
+
+.chat-form {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 0.6rem;
+}
+
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tag-pill {
+  background: #20102d;
+  color: #dbcbe5;
+  border: 1px solid #5a3f6e;
+  padding: 0.45rem 0.6rem;
+}
+
+.tag-pill.active {
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.error-box,
+.success-box {
+  border-radius: 10px;
+  padding: 0.62rem 0.75rem;
+  font-size: 0.92rem;
+}
+
+.error-box {
+  background: rgba(190, 52, 90, 0.24);
+  border: 1px solid #a63e67;
+}
+
+.success-box {
+  background: rgba(73, 158, 112, 0.2);
+  border: 1px solid #5ab18a;
+}
+
+.muted {
+  color: var(--text-soft);
+}
+
+@media (max-width: 1100px) {
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dotart-card {
+    order: 2;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 850px) {
+  .app-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #41294f;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    gap: 0.8rem;
+  }
+
+  .menu {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+}
