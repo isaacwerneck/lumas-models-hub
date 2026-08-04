@@ -5,6 +5,7 @@ import { env } from "./config/env";
 import prismaPlugin from "./plugins/prisma";
 import authPlugin from "./plugins/auth";
 import authRoutes from "./modules/auth/auth.routes";
+import chatterRoutes from "./modules/chatter/chatter.routes";
 
 export const buildApp = () => {
   const app = Fastify({
@@ -25,6 +26,7 @@ export const buildApp = () => {
   });
 
   app.register(authRoutes, { prefix: "/auth" });
+  app.register(chatterRoutes, { prefix: "/chatter" });
 
   return app;
 };
