@@ -16,6 +16,7 @@ const envSchema = z.object({
   COOKIE_SECURE: z.coerce.boolean().default(false),
   COMMISSION_DIVISOR: z.coerce.number().int().positive().default(4),
   OCR_LOW_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  OCR_LANG: z.string().default("por+eng"),
   TZ: z.string().default("America/Sao_Paulo")
 });
 
