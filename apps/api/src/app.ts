@@ -11,6 +11,7 @@ import chatterRoutes from "./modules/chatter/chatter.routes";
 import managerRoutes from "./modules/manager/manager.routes";
 import chatRoutes from "./modules/chat/chat.routes";
 import ocrRoutes from "./modules/ocr/ocr.routes";
+import fxRoutes from "./modules/fx/fx.routes";
 
 export const buildApp = () => {
   const app = Fastify({
@@ -41,6 +42,7 @@ export const buildApp = () => {
   app.register(managerRoutes, { prefix: "/manager" });
   app.register(chatRoutes, { prefix: "/chat" });
   app.register(ocrRoutes, { prefix: "/ocr" });
+  app.register(fxRoutes, { prefix: "/fx" });
 
   return app;
 };

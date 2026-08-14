@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { DotartSide } from "../components/DotartSide";
 
 export const LoginPage = () => {
   const { user, login } = useAuth();
@@ -32,32 +33,45 @@ export const LoginPage = () => {
 
   return (
     <div className="login-screen">
+      <DotartSide className="login-ornament left" />
+
       <form className="login-card" onSubmit={onSubmit}>
-        <img src="/assets/logo.png" alt="LumasModels" className="login-logo" />
-        <h1>Entrar</h1>
-        <p>Acesso interno do LumasModels Hub.</p>
+        <div className="login-logo-wrap">
+          <img src="/assets/logo.png" alt="LumasModels" className="login-logo" />
+        </div>
 
-        <label>
-          Usuário
-          <input value={username} onChange={(e) => setUsername(e.target.value)} required />
-        </label>
+        <div className="login-fields">
+          <label>
+            Login
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Nome"
+              required
+            />
+          </label>
 
-        <label>
-          Senha
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
-        </label>
+          <label>
+            Senha
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Senha"
+              required
+            />
+            <small className="muted">Esqueci a senha</small>
+          </label>
 
-        {error ? <div className="error-box">{error}</div> : null}
+          {error ? <div className="error-box">{error}</div> : null}
 
-        <button className="primary-button" type="submit" disabled={loading}>
-          {loading ? "Entrando..." : "Entrar"}
-        </button>
+          <button className="primary-button login-submit" type="submit" disabled={loading}>
+            {loading ? "Entrando..." : "Entrar"}
+          </button>
+        </div>
       </form>
+
+      <DotartSide className="login-ornament right" />
     </div>
   );
 };
