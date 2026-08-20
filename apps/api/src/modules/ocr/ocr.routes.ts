@@ -1,16 +1,32 @@
+import crypto from "node:crypto";
+import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
+import { AuditAction, NotificationType } from "@prisma/client";
 import { z } from "zod";
 import Tesseract from "tesseract.js";
 import { env } from "../../config/env";
-import { brlStringToCents, extractCurrencyCandidatesFromText } from "../../utils/currency";
+import {
+  brlStringToCents,
+  extractCurrencyCandidatesFromText,
+  extractFaturadoValueFromText
+} from "../../utils/currency";
+import { createNotifications } from "../notifications/notification.service";
+import { newEvidenceKey, normalizeEvidenceImage } from "../../services/storage";
 
 const querySchema = z.object({
   fallbackValue: z.string().optional()
 });
 
 const ocrRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.post("/extract", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.post("/extract", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string };
     const query = querySchema.parse(request.query);
+
+    const contentType = request.headers["content-type"] ?? "";
+    if (!contentType.startsWith("multipart/form-data")) {
+      return reply.code(400).send({ message: "Envie uma imagem no campo 'image'." });
+    }
+
     const file = await request.file();
 
     if (!file) {
@@ -22,26 +38,69 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ message: "Arquivo invalido: apenas imagem e permitida." });
     }
 
-    const buffer = await file.toBuffer();
+    const rawBuffer = await file.toBuffer();
+    let normalized;
+    try {
+      normalized = await normalizeEvidenceImage(rawBuffer);
+    } catch {
+      return reply.code(400).send({ message: "Imagem inválida. Envie PNG, JPEG ou WebP com até 10 MB." });
+    }
+    const buffer = normalized.buffer;
+    const evidenceKey = newEvidenceKey(authUser.sub);
+    await fastify.evidenceStorage.put(evidenceKey, buffer, normalized.mimeType);
+
+    let evidence;
+    try {
+      evidence = await fastify.prisma.$transaction(async (tx) => {
+        const created = await tx.evidence.create({ data: {
+          uploadedById: authUser.sub,
+          storageKey: evidenceKey,
+          originalName: path.basename(file.filename || "comprovante.webp").slice(0, 255),
+          mimeType: normalized.mimeType,
+          sizeBytes: buffer.length,
+          sha256: normalized.sha256
+        } });
+        await tx.auditLog.create({ data: {
+          actorId: authUser.sub, action: AuditAction.EVIDENCE_UPLOADED,
+          targetType: "Evidence", targetId: created.id,
+          metadata: { mimeType: created.mimeType, sizeBytes: created.sizeBytes, sha256: created.sha256 }
+        } });
+        return created;
+      });
+    } catch (error) {
+      await fastify.evidenceStorage.delete(evidenceKey);
+      throw error;
+    }
 
     const result = await Tesseract.recognize(buffer, env.OCR_LANG);
     const rawText = result.data.text ?? "";
     const confidence = Number(((result.data.confidence ?? 0) / 100).toFixed(4));
 
     const candidates = extractCurrencyCandidatesFromText(rawText);
+    const contextualDetectedValue = extractFaturadoValueFromText(rawText);
 
     let detectedValue: string | null = null;
     let detectedCents: number | null = null;
 
-    for (const candidate of candidates) {
-      const cents = brlStringToCents(candidate);
-      if (cents === null) {
-        continue;
+    if (contextualDetectedValue) {
+      const contextualCents = brlStringToCents(contextualDetectedValue);
+      if (contextualCents !== null) {
+        detectedValue = contextualDetectedValue;
+        detectedCents = contextualCents;
       }
+    }
 
-      if (detectedCents === null || cents > detectedCents) {
-        detectedCents = cents;
-        detectedValue = candidate;
+    if (detectedCents === null) {
+      for (const candidate of candidates) {
+        const cents = brlStringToCents(candidate);
+        if (cents === null) {
+          continue;
+        }
+
+        if (detectedCents === null || cents > detectedCents) {
+          detectedCents = cents;
+          detectedValue = candidate;
+        }
       }
     }
 
@@ -53,6 +112,18 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
+    if (confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD) {
+      await createNotifications(fastify, {
+        userIds: [authUser.sub],
+        type: NotificationType.OCR_LOW_CONFIDENCE,
+        title: "OCR com baixa confiança",
+        message: "Confira manualmente o valor identificado antes de continuar.",
+        sourceType: "OcrImage",
+        sourceId: crypto.createHash("sha256").update(buffer).digest("hex"),
+        metadata: { confidence, detectedValue }
+      });
+    }
+
     return {
       rawText,
       confidence,
@@ -60,6 +131,14 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       detectedValue,
       detectedCents,
       requiresManualConfirmation: confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD
+      ,evidence: {
+        id: evidence.id,
+        originalName: evidence.originalName,
+        mimeType: evidence.mimeType,
+        sizeBytes: evidence.sizeBytes,
+        sha256: evidence.sha256,
+        status: evidence.status
+      }
     };
   });
 };

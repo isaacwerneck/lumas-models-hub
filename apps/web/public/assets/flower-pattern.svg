@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="140" height="180" viewBox="0 0 140 180">
+  <!-- stem -->
+  <path d="M70 95 C70 120, 62 145, 56 172" stroke="#f5c76a" stroke-width="2.5" fill="none" opacity="0.55"/>
+  <path d="M70 118 C82 124, 92 128, 100 134" stroke="#f5c76a" stroke-width="2" fill="none" opacity="0.4"/>
+  <!-- petals (dot-art style) -->
+  <circle cx="70" cy="52" r="9" fill="#ed00b2" opacity="0.5"/>
+  <circle cx="52" cy="62" r="8" fill="#ed00b2" opacity="0.45"/>
+  <circle cx="88" cy="62" r="8" fill="#ed00b2" opacity="0.45"/>
+  <circle cx="46" cy="80" r="7" fill="#ed00b2" opacity="0.4"/>
+  <circle cx="94" cy="80" r="7" fill="#ed00b2" opacity="0.4"/>
+  <circle cx="52" cy="96" r="7" fill="#ed00b2" opacity="0.4"/>
+  <circle cx="88" cy="96" r="7" fill="#ed00b2" opacity="0.4"/>
+  <!-- center -->
+  <circle cx="70" cy="78" r="10" fill="#f5c76a" opacity="0.6"/>
+  <circle cx="70" cy="78" r="4" fill="#fff" opacity="0.5"/>
+</svg>

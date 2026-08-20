@@ -1,18 +1,28 @@
-import { Role, ShiftStatus, PaymentStatus, AuditAction } from "@prisma/client";
+import { AuditAction, EarningsStatus, EvidenceStatus, NotificationType, Prisma, Role, ShiftStatus } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
+import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pagination";
+import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
-import {
-  daysUntilNextMonday,
-  getWeekRangeInBusinessTz,
-  isMondayInBusinessTz,
-  nowInBusinessTz
-} from "../../utils/time";
+import { getMonthRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
+import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
+import { queueEvidencePurge } from "../../services/evidence-cleanup";
+
+const moneyMetadataSchema = z.object({
+  currency: z.enum(["BRL", "USD"]).default("BRL"),
+  originalAmountCents: z.number().int().nonnegative().safe().optional(),
+  fxRate: z.number().positive().optional(),
+  fxProvider: z.string().max(80).optional(),
+  fxQuotedAt: z.string().datetime().optional()
+}).optional();
 
 const startShiftSchema = z.object({
   modelTagId: z.string().min(1),
-  startImageUrl: z.string().min(1),
+  startedAt: z.string().datetime().optional(),
+  startImageUrl: z.string().min(1).optional(),
+  startEvidenceId: z.string().min(1).optional(),
+  moneyMetadata: moneyMetadataSchema,
   ocrRawText: z.string().optional(),
   ocrConfidence: z.number().min(0).max(1).optional(),
   ocrDetectedValue: z.string().optional(),
@@ -20,7 +30,10 @@ const startShiftSchema = z.object({
 });
 
 const closeShiftSchema = z.object({
-  endImageUrl: z.string().min(1),
+  endedAt: z.string().datetime().optional(),
+  endImageUrl: z.string().min(1).optional(),
+  endEvidenceId: z.string().min(1).optional(),
+  moneyMetadata: moneyMetadataSchema,
   ocrRawText: z.string().optional(),
   ocrConfidence: z.number().min(0).max(1).optional(),
   ocrDetectedValue: z.string().optional(),
@@ -32,6 +45,44 @@ const shiftParamsSchema = z.object({
   shiftId: z.string().min(1)
 });
 
+const historyQuerySchema = paginationSchema.extend({
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+  search: z.string().trim().max(100).optional(),
+  status: z.enum([ShiftStatus.OPEN, ShiftStatus.CLOSED]).optional(),
+  modelTagId: z.string().min(1).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
+});
+
+const paymentHistoryQuerySchema = paginationSchema.extend({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
+});
+
+const updateShiftSchema = z
+  .object({
+    startedAt: z.string().datetime().optional(),
+    endedAt: z.string().datetime().optional(),
+    startImageUrl: z.string().min(1).optional(),
+    endImageUrl: z.string().min(1).optional(),
+    startValue: z.string().optional(),
+    endValue: z.string().optional(),
+    negativeJustification: z.string().optional(),
+    notes: z.string().max(500).optional()
+  })
+  .refine(
+    (value) =>
+      value.startedAt !== undefined ||
+      value.endedAt !== undefined ||
+      value.startImageUrl !== undefined ||
+      value.endImageUrl !== undefined ||
+      value.startValue !== undefined ||
+      value.endValue !== undefined ||
+      value.negativeJustification !== undefined ||
+      value.notes !== undefined,
+    { message: "Informe pelo menos um campo para atualizacao." }
+  );
+
 const ensureChatterRole = (role: Role) => {
   if (role !== Role.CHATTER) {
     return false;
@@ -41,6 +92,38 @@ const ensureChatterRole = (role: Role) => {
 };
 
 const chatterRoutes: FastifyPluginAsync = async (fastify) => {
+  const ensureEditableEarnings = async (chatterId: string, shiftId: string) => {
+    const earnings = await fastify.prisma.earnings.findUnique({
+      where: { shiftId }
+    });
+
+    if (earnings && earnings.status === EarningsStatus.PAID) {
+      return {
+        editable: false,
+        message: "Lancamentos de ganho ja pago nao podem ser editados ou apagados."
+      };
+    }
+
+    return { editable: true };
+  };
+
+  const syncEarningsForShift = async (
+    tx: Prisma.TransactionClient,
+    chatterId: string,
+    shiftId: string,
+    payoutAmountCents: number
+  ) => {
+    if (payoutAmountCents > 0) {
+      await tx.earnings.upsert({
+        where: { shiftId },
+        create: { chatterId, shiftId, amountCents: payoutAmountCents },
+        update: { amountCents: payoutAmountCents }
+      });
+    } else {
+      await tx.earnings.deleteMany({ where: { shiftId } });
+    }
+  };
+
   fastify.get("/shifts/current", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
 
@@ -69,6 +152,242 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     return { shift };
   });
 
+  fastify.get("/shifts/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+
+    if (!ensureChatterRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    }
+
+    const query = historyQuerySchema.parse(request.query);
+
+    const where: Prisma.ShiftWhereInput = {
+      chatterId: authUser.sub,
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.modelTagId ? { modelTagId: query.modelTagId } : {}),
+      ...(query.search ? { modelTag: { name: { contains: query.search, mode: "insensitive" } } } : {}),
+      ...(query.from || query.to
+        ? { startedAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const isV1 = request.url.startsWith("/api/v1/");
+    const [shifts, total] = await fastify.prisma.$transaction([
+      fastify.prisma.shift.findMany({
+      where,
+      include: {
+        modelTag: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      ...(isV1 ? paginationArgs(query.page, query.pageSize) : { take: query.limit })
+      }),
+      fastify.prisma.shift.count({ where })
+    ]);
+
+    const items = shifts.map((shift) => ({
+        ...shift,
+        startValueFormatted: centsToBrl(shift.startValueCents),
+        endValueFormatted: shift.endValueCents !== null ? centsToBrl(shift.endValueCents) : null,
+        grossAmountFormatted: shift.grossAmountCents !== null ? centsToBrl(shift.grossAmountCents) : null,
+        payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null
+      }));
+    return { shifts: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : query.limit, total) };
+  });
+
+  fastify.patch("/shifts/:shiftId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+
+    if (!ensureChatterRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    }
+
+    const params = shiftParamsSchema.parse(request.params);
+    const body = updateShiftSchema.parse(request.body);
+
+    const shift = await fastify.prisma.shift.findFirst({
+      where: {
+        id: params.shiftId,
+        chatterId: authUser.sub,
+        status: ShiftStatus.CLOSED
+      },
+      include: {
+        modelTag: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    if (!shift) {
+      return reply.code(404).send({ message: "Lancamento fechado nao encontrado." });
+    }
+
+    const editable = await ensureEditableEarnings(authUser.sub, shift.id);
+    if (!editable.editable) {
+      return reply.code(409).send({ message: editable.message });
+    }
+
+    const startedAt = body.startedAt ? new Date(body.startedAt) : shift.startedAt;
+    const endedAt = body.endedAt ? new Date(body.endedAt) : shift.endedAt;
+
+    if (!endedAt) {
+      return reply.code(400).send({ message: "Lancamento fechado precisa de data/hora final." });
+    }
+
+    if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
+      return reply.code(400).send({ message: "Data/hora invalida." });
+    }
+
+    if (endedAt <= startedAt) {
+      return reply.code(400).send({ message: "Data/hora final precisa ser posterior ao inicio." });
+    }
+
+    const startValueCents = body.startValue !== undefined ? brlStringToCents(body.startValue) : shift.startValueCents;
+    const endValueCents = body.endValue !== undefined ? brlStringToCents(body.endValue) : shift.endValueCents;
+
+    if (startValueCents === null || endValueCents === null) {
+      return reply.code(400).send({ message: "Valor invalido. Use formato brasileiro, ex: R$ 1.234,56." });
+    }
+
+    const grossAmountCents = endValueCents - startValueCents;
+    const payoutAmountCents = Math.trunc(grossAmountCents / env.COMMISSION_DIVISOR);
+    const negativeJustification = body.negativeJustification ?? shift.negativeJustification ?? null;
+
+    if (grossAmountCents < 0 && !(negativeJustification && negativeJustification.trim().length > 0)) {
+      return reply.code(400).send({ message: "Saldo negativo exige justificativa." });
+    }
+
+    const updatedShift = await fastify.prisma.$transaction(async (tx) => {
+      const updated = await tx.shift.update({
+        where: {
+          id: shift.id
+        },
+        data: {
+          startedAt,
+          endedAt,
+          startImageUrl: body.startImageUrl ?? shift.startImageUrl,
+          endImageUrl: body.endImageUrl ?? shift.endImageUrl,
+          startValueCents,
+          endValueCents,
+          startValueConfirmedAt: new Date(),
+          endValueConfirmedAt: new Date(),
+          grossAmountCents,
+          commissionDivisor: env.COMMISSION_DIVISOR,
+          payoutAmountCents,
+          negativeJustification: grossAmountCents < 0 ? negativeJustification?.trim() ?? null : null,
+          notes: body.notes !== undefined ? (body.notes.trim() === "" ? null : body.notes.trim()) : shift.notes
+        },
+        include: {
+          modelTag: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } }
+        }
+      });
+
+      await syncEarningsForShift(tx, authUser.sub, shift.id, payoutAmountCents);
+
+      await tx.auditLog.create({
+        data: {
+          actorId: authUser.sub,
+          action: AuditAction.SHIFT_UPDATED,
+          targetType: "Shift",
+          targetId: shift.id,
+          metadata: { fields: Object.keys(body), grossAmountCents, payoutAmountCents, ...auditRequestMetadata(request) }
+        }
+      });
+
+      return updated;
+    });
+
+    fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, {
+      shiftId: updatedShift.id,
+      operation: "updated"
+    });
+
+    return {
+      shift: {
+        ...updatedShift,
+        startValueFormatted: centsToBrl(updatedShift.startValueCents),
+        endValueFormatted: updatedShift.endValueCents !== null ? centsToBrl(updatedShift.endValueCents) : null,
+        grossAmountFormatted:
+          updatedShift.grossAmountCents !== null ? centsToBrl(updatedShift.grossAmountCents) : null,
+        payoutAmountFormatted:
+          updatedShift.payoutAmountCents !== null ? centsToBrl(updatedShift.payoutAmountCents) : null
+      }
+    };
+  });
+
+  fastify.delete("/shifts/:shiftId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+
+    if (!ensureChatterRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    }
+
+    const params = shiftParamsSchema.parse(request.params);
+
+    const shift = await fastify.prisma.shift.findFirst({
+      where: {
+        id: params.shiftId,
+        chatterId: authUser.sub
+      }
+    });
+
+    if (!shift) {
+      return reply.code(404).send({ message: "Lancamento nao encontrado." });
+    }
+
+    if (shift.status === ShiftStatus.CLOSED) {
+      const editable = await ensureEditableEarnings(authUser.sub, shift.id);
+      if (!editable.editable) {
+        return reply.code(409).send({ message: editable.message });
+      }
+    }
+
+    const evidence = await fastify.prisma.evidence.findMany({
+      where: { id: { in: [shift.startEvidenceId, shift.endEvidenceId].filter((id): id is string => Boolean(id)) } },
+      select: { id: true, sha256: true }
+    });
+    await fastify.prisma.$transaction(async (tx) => {
+      await queueEvidencePurge(tx, evidence.map((item) => item.id));
+      await tx.shift.delete({ where: { id: shift.id } });
+      await tx.auditLog.create({
+        data: {
+          actorId: authUser.sub,
+          action: AuditAction.SHIFT_DELETED,
+          targetType: "Shift",
+          targetId: shift.id,
+          metadata: {
+            modelTagId: shift.modelTagId, status: shift.status,
+            grossAmountCents: shift.grossAmountCents,
+            evidence: evidence.map((item) => ({ id: item.id, sha256: item.sha256 })),
+            ...auditRequestMetadata(request)
+          }
+        }
+      });
+    });
+
+    fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, {
+      shiftId: shift.id,
+      operation: "deleted"
+    });
+
+    return {
+      success: true
+    };
+  });
+
   fastify.post("/shifts/start", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
 
@@ -77,11 +396,20 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const body = startShiftSchema.parse(request.body);
+    const isV1 = request.url.startsWith("/api/v1/");
+    if (isV1 && !body.startEvidenceId) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    if (!isV1 && !body.startEvidenceId && !body.startImageUrl) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    const startedAt = body.startedAt ? new Date(body.startedAt) : nowInBusinessTz().toDate();
+
+    if (Number.isNaN(startedAt.getTime())) {
+      return reply.code(400).send({ message: "Data/hora de inicio invalida." });
+    }
 
     const chatterHasTag = await fastify.prisma.chatterModelTag.findFirst({
       where: {
         chatterId: authUser.sub,
-        modelTagId: body.modelTagId
+        modelTagId: body.modelTagId,
+        modelTag: { isActive: true }
       }
     });
 
@@ -90,10 +418,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const existingOpenShift = await fastify.prisma.shift.findFirst({
-      where: {
-        modelTagId: body.modelTagId,
-        status: ShiftStatus.OPEN
-      },
+      where: { status: ShiftStatus.OPEN, OR: [{ modelTagId: body.modelTagId }, { chatterId: authUser.sub }] },
       include: {
         chatter: {
           select: {
@@ -106,7 +431,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (existingOpenShift) {
       return reply.code(409).send({
-        message: "Já existe um chatter em turno aberto para essa modelo.",
+        message: existingOpenShift.chatter.id === authUser.sub ? "Você já possui um turno aberto." : "Já existe um chatter em turno aberto para essa modelo.",
         openShift: {
           id: existingOpenShift.id,
           chatter: existingOpenShift.chatter,
@@ -144,27 +469,59 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    const shift = await fastify.prisma.shift.create({
-      data: {
+    let shift;
+    try {
+      shift = await fastify.prisma.$transaction(async (tx) => {
+      if (body.startEvidenceId) {
+        const claimed = await tx.evidence.updateMany({
+          where: { id: body.startEvidenceId, uploadedById: authUser.sub, status: EvidenceStatus.AVAILABLE, attachedAt: null },
+          data: { attachedAt: new Date() }
+        });
+        if (claimed.count !== 1) throw new Error("EVIDENCE_NOT_ATTACHABLE");
+      }
+      const created = await tx.shift.create({ data: {
         chatterId: authUser.sub,
         modelTagId: body.modelTagId,
         status: ShiftStatus.OPEN,
-        startedAt: nowInBusinessTz().toDate(),
-        startImageUrl: body.startImageUrl,
+        startedAt,
+        startImageUrl: body.startImageUrl ?? null,
+        startEvidenceId: body.startEvidenceId,
         startOcrRawText: body.ocrRawText,
         startOcrConfidence: confidence,
         startValueCents: finalStartValueCents,
-        startValueConfirmedAt: body.manualConfirmedValue ? new Date() : null
-      },
-      include: {
+        startValueConfirmedAt: body.manualConfirmedValue ? startedAt : null,
+        startOriginalCurrency: body.moneyMetadata?.currency ?? "BRL",
+        startOriginalAmountCents: body.moneyMetadata?.originalAmountCents ?? finalStartValueCents,
+        startFxRate: body.moneyMetadata?.fxRate,
+        startFxProvider: body.moneyMetadata?.fxProvider,
+        startFxQuotedAt: body.moneyMetadata?.fxQuotedAt ? new Date(body.moneyMetadata.fxQuotedAt) : null
+      }, include: {
         modelTag: {
           select: {
             id: true,
             name: true
           }
         }
+      } });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub,
+        action: AuditAction.SHIFT_STARTED,
+        targetType: "Shift",
+        targetId: created.id,
+        metadata: {
+          modelTagId: created.modelTagId, startValueCents: created.startValueCents,
+          ...auditRequestMetadata(request)
+        }
+      } });
+      return created;
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ message: "Outro turno foi aberto ao mesmo tempo. Atualize a página e tente novamente." });
       }
-    });
+      if ((error as Error).message === "EVIDENCE_NOT_ATTACHABLE") return reply.code(409).send({ message: "Comprovante inválido, já utilizado ou pertencente a outro usuário." });
+      throw error;
+    }
 
     return reply.code(201).send({
       shift,
@@ -181,6 +538,14 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
 
     const params = shiftParamsSchema.parse(request.params);
     const body = closeShiftSchema.parse(request.body);
+    const isV1 = request.url.startsWith("/api/v1/");
+    if (isV1 && !body.endEvidenceId) return reply.code(400).send({ message: "Envie o comprovante final antes de encerrar o turno." });
+    if (!isV1 && !body.endEvidenceId && !body.endImageUrl) return reply.code(400).send({ message: "Envie o comprovante final antes de encerrar o turno." });
+    const endedAt = body.endedAt ? new Date(body.endedAt) : nowInBusinessTz().toDate();
+
+    if (Number.isNaN(endedAt.getTime())) {
+      return reply.code(400).send({ message: "Data/hora de batida invalida." });
+    }
 
     const shift = await fastify.prisma.shift.findFirst({
       where: {
@@ -192,6 +557,10 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!shift) {
       return reply.code(404).send({ message: "Turno aberto não encontrado para esse chatter." });
+    }
+
+    if (endedAt <= shift.startedAt) {
+      return reply.code(400).send({ message: "Data/hora da batida final precisa ser posterior ao inicio do turno." });
     }
 
     const resolvedCents = resolveOcrValueCents({
@@ -232,60 +601,86 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    const now = nowInBusinessTz().toDate();
+    const managerIds = grossAmountCents < 0
+      ? (await fastify.prisma.user.findMany({
+          where: { role: Role.MANAGER, isActive: true }, select: { id: true }
+        })).map((manager) => manager.id)
+      : [];
 
     const closedShift = await fastify.prisma.$transaction(async (tx) => {
+      if (body.endEvidenceId) {
+        const claimed = await tx.evidence.updateMany({
+          where: { id: body.endEvidenceId, uploadedById: authUser.sub, status: EvidenceStatus.AVAILABLE, attachedAt: null },
+          data: { attachedAt: new Date() }
+        });
+        if (claimed.count !== 1) throw new Error("EVIDENCE_NOT_ATTACHABLE");
+      }
       const updatedShift = await tx.shift.update({
         where: {
           id: shift.id
         },
         data: {
           status: ShiftStatus.CLOSED,
-          endedAt: now,
-          endImageUrl: body.endImageUrl,
+          endedAt,
+          endImageUrl: body.endImageUrl ?? null,
+          endEvidenceId: body.endEvidenceId,
           endOcrRawText: body.ocrRawText,
           endOcrConfidence: confidence,
           endValueCents,
-          endValueConfirmedAt: body.manualConfirmedValue ? now : null,
+          endValueConfirmedAt: body.manualConfirmedValue ? endedAt : null,
           grossAmountCents,
           commissionDivisor: env.COMMISSION_DIVISOR,
           payoutAmountCents,
-          negativeJustification: grossAmountCents < 0 ? body.negativeJustification?.trim() : null
+          negativeJustification: grossAmountCents < 0 ? body.negativeJustification?.trim() : null,
+          endOriginalCurrency: body.moneyMetadata?.currency ?? "BRL",
+          endOriginalAmountCents: body.moneyMetadata?.originalAmountCents ?? endValueCents,
+          endFxRate: body.moneyMetadata?.fxRate,
+          endFxProvider: body.moneyMetadata?.fxProvider,
+          endFxQuotedAt: body.moneyMetadata?.fxQuotedAt ? new Date(body.moneyMetadata.fxQuotedAt) : null
         }
       });
 
-      const weekRange = getWeekRangeInBusinessTz(now);
+      await syncEarningsForShift(tx, authUser.sub, shift.id, payoutAmountCents);
 
-      await tx.weeklyPayout.upsert({
-        where: {
-          chatterId_weekStartDate: {
-            chatterId: authUser.sub,
-            weekStartDate: weekRange.weekStart
-          }
-        },
-        create: {
-          chatterId: authUser.sub,
-          weekStartDate: weekRange.weekStart,
-          weekEndDate: weekRange.weekEnd,
-          weekGrossCents: grossAmountCents,
-          weekPayoutCents: payoutAmountCents,
-          status: PaymentStatus.PENDING
-        },
-        update: {
-          weekEndDate: weekRange.weekEnd,
-          weekGrossCents: {
-            increment: grossAmountCents
-          },
-          weekPayoutCents: {
-            increment: payoutAmountCents
-          },
-          // New/changed values require chatter confirmation again.
-          status: PaymentStatus.PENDING,
-          chatterConfirmedAt: null
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub,
+        action: AuditAction.SHIFT_CLOSED,
+        targetType: "Shift",
+        targetId: shift.id,
+        metadata: {
+          modelTagId: shift.modelTagId, grossAmountCents, payoutAmountCents,
+          ...auditRequestMetadata(request)
         }
-      });
+      } });
+
+      if (grossAmountCents < 0) {
+        await tx.notification.createMany({
+          data: [...new Set([authUser.sub, ...managerIds])].map((userId) => ({
+            userId,
+            type: NotificationType.NEGATIVE_SHIFT,
+            title: "Turno com saldo negativo",
+            message: "Um turno foi encerrado com produção negativa e requer acompanhamento.",
+            sourceType: "Shift",
+            sourceId: shift.id,
+            metadata: { chatterId: authUser.sub, modelTagId: shift.modelTagId, grossAmountCents }
+          })),
+          skipDuplicates: true
+        });
+      }
 
       return updatedShift;
+    }).catch((error: unknown) => {
+      if ((error as Error).message === "EVIDENCE_NOT_ATTACHABLE") return null;
+      throw error;
+    });
+
+    if (!closedShift) {
+      return reply.code(409).send({ message: "Comprovante inválido, já utilizado ou pertencente a outro usuário." });
+    }
+
+    fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, {
+      shiftId: closedShift.id,
+      operation: "closed"
     });
 
     return {
@@ -302,152 +697,80 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(403).send({ message: "Acesso restrito a chatters." });
     }
 
-    const weekRange = getWeekRangeInBusinessTz();
+    const thisMonth = getMonthRangeInBusinessTz();
+    const lastMonth = getMonthRangeInBusinessTz(-1);
 
-    const weeklyPayout = await fastify.prisma.weeklyPayout.findUnique({
-      where: {
-        chatterId_weekStartDate: {
-          chatterId: authUser.sub,
-          weekStartDate: weekRange.weekStart
-        }
-      }
-    });
+    const [pendingAgg, lifetimeAgg, thisMonthAgg, lastMonthAgg] = await Promise.all([
+      fastify.prisma.earnings.aggregate({
+        where: { chatterId: authUser.sub, status: EarningsStatus.PENDING },
+        _sum: { amountCents: true }
+      }),
+      fastify.prisma.paymentHistory.aggregate({
+        where: { chatterId: authUser.sub },
+        _sum: { totalCents: true }
+      }),
+      fastify.prisma.paymentHistory.aggregate({
+        where: { chatterId: authUser.sub, paidAt: thisMonth },
+        _sum: { totalCents: true }
+      }),
+      fastify.prisma.paymentHistory.aggregate({
+        where: { chatterId: authUser.sub, paidAt: lastMonth },
+        _sum: { totalCents: true }
+      })
+    ]);
 
-    const lifetimePaid = await fastify.prisma.weeklyPayout.aggregate({
-      where: {
-        chatterId: authUser.sub,
-        status: {
-          in: [PaymentStatus.PAID, PaymentStatus.FORCED_PAID]
-        }
-      },
-      _sum: {
-        weekPayoutCents: true
-      }
-    });
-
-    const status = weeklyPayout?.status ?? PaymentStatus.PENDING;
+    const pendingCents = pendingAgg._sum.amountCents ?? 0;
+    const lifetimePaidCents = lifetimeAgg._sum.totalCents ?? 0;
+    const thisMonthPaidCents = thisMonthAgg._sum.totalCents ?? 0;
+    const lastMonthPaidCents = lastMonthAgg._sum.totalCents ?? 0;
 
     return {
-      timezone: env.TZ,
-      weekStartDate: weekRange.weekStart,
-      weekEndDate: weekRange.weekEnd,
-      currentWeek: {
-        grossCents: weeklyPayout?.weekGrossCents ?? 0,
-        payoutCents: weeklyPayout?.weekPayoutCents ?? 0,
-        grossFormatted: centsToBrl(weeklyPayout?.weekGrossCents ?? 0),
-        payoutFormatted: centsToBrl(weeklyPayout?.weekPayoutCents ?? 0),
-        status,
-        chatterConfirmedAt: weeklyPayout?.chatterConfirmedAt ?? null,
-        paidAt: weeklyPayout?.paidAt ?? null
-      },
-      lifetime: {
-        paidCents: lifetimePaid._sum.weekPayoutCents ?? 0,
-        paidFormatted: centsToBrl(lifetimePaid._sum.weekPayoutCents ?? 0)
-      },
-      daysUntilNextPayment: daysUntilNextMonday(),
-      paymentDone: status === PaymentStatus.PAID || status === PaymentStatus.FORCED_PAID,
-      canConfirmToday: isMondayInBusinessTz()
+      pendingCents,
+      pendingFormatted: centsToBrl(pendingCents),
+      lifetimePaidCents,
+      lifetimePaidFormatted: centsToBrl(lifetimePaidCents),
+      thisMonthPaidCents,
+      thisMonthPaidFormatted: centsToBrl(thisMonthPaidCents),
+      lastMonthPaidCents,
+      lastMonthPaidFormatted: centsToBrl(lastMonthPaidCents)
     };
   });
 
-  fastify.get("/payment/review", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.get("/payment/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
 
     if (!ensureChatterRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a chatters." });
     }
 
-    const weekRange = getWeekRangeInBusinessTz();
-
-    const shifts = await fastify.prisma.shift.findMany({
-      where: {
-        chatterId: authUser.sub,
-        status: ShiftStatus.CLOSED,
-        endedAt: {
-          gte: weekRange.weekStart,
-          lte: weekRange.weekEnd
-        }
-      },
+    const query = paymentHistoryQuerySchema.parse(request.query);
+    const where: Prisma.PaymentHistoryWhereInput = {
+      chatterId: authUser.sub,
+      ...(query.from || query.to
+        ? { paidAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const isV1 = request.url.startsWith("/api/v1/");
+    const [history, total] = await fastify.prisma.$transaction([
+      fastify.prisma.paymentHistory.findMany({
+      where,
+      orderBy: [{ paidAt: "desc" }, { id: "desc" }],
       include: {
-        modelTag: {
-          select: {
-            id: true,
-            name: true
-          }
-        }
+        manager: { select: { id: true, displayName: true } }
       },
-      orderBy: {
-        endedAt: "asc"
-      }
-    });
+      ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
+      }),
+      fastify.prisma.paymentHistory.count({ where })
+    ]);
 
-    return {
-      timezone: env.TZ,
-      weekStartDate: weekRange.weekStart,
-      weekEndDate: weekRange.weekEnd,
-      shifts: shifts.map((shift) => ({
-        ...shift,
-        grossAmountFormatted: shift.grossAmountCents !== null ? centsToBrl(shift.grossAmountCents) : null,
-        payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null
-      }))
-    };
-  });
-
-  fastify.post("/payment/confirm", { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const authUser = request.user as { sub: string; role: Role };
-
-    if (!ensureChatterRole(authUser.role)) {
-      return reply.code(403).send({ message: "Acesso restrito a chatters." });
-    }
-
-    if (!isMondayInBusinessTz()) {
-      return reply.code(403).send({
-        message: "A confirmação de honorários só pode ser feita às segundas-feiras (America/Sao_Paulo)."
-      });
-    }
-
-    const now = nowInBusinessTz().toDate();
-    const weekRange = getWeekRangeInBusinessTz(now);
-
-    const payout = await fastify.prisma.weeklyPayout.upsert({
-      where: {
-        chatterId_weekStartDate: {
-          chatterId: authUser.sub,
-          weekStartDate: weekRange.weekStart
-        }
-      },
-      create: {
-        chatterId: authUser.sub,
-        weekStartDate: weekRange.weekStart,
-        weekEndDate: weekRange.weekEnd,
-        status: PaymentStatus.CHATTER_CONFIRMED,
-        chatterConfirmedAt: now
-      },
-      update: {
-        status: PaymentStatus.CHATTER_CONFIRMED,
-        chatterConfirmedAt: now,
-        weekEndDate: weekRange.weekEnd
-      }
-    });
-
-    await fastify.prisma.auditLog.create({
-      data: {
-        actorId: authUser.sub,
-        action: AuditAction.PAYMENT_CONFIRMED,
-        targetType: "WeeklyPayout",
-        targetId: payout.id,
-        metadata: {
-          weekStartDate: weekRange.weekStart,
-          weekEndDate: weekRange.weekEnd,
-          confirmedAt: now
-        }
-      }
-    });
-
-    return {
-      success: true,
-      payout
-    };
+    const items = history.map((item) => ({
+        id: item.id,
+        totalCents: item.totalCents,
+        totalFormatted: centsToBrl(item.totalCents),
+        paidAt: item.paidAt,
+        manager: item.manager
+      }));
+    return { history: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
   });
 };
 

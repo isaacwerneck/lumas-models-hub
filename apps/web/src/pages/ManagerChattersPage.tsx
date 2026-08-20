@@ -1,110 +1,203 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import type { ChatterListItem, Pagination } from "@lumas/contracts";
 import { api } from "../lib/api";
+import { useToast } from "../components/Toast";
+import { getApiErrorMessage } from "../lib/apiError";
+import { ManagerTagsPage } from "./ManagerTagsPage";
+import { ModalDialog } from "../components/ModalDialog";
 
 export const ManagerChattersPage = () => {
-  const [chatters, setChatters] = useState<any[]>([]);
+  const [chatters, setChatters] = useState<ChatterListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [params, setParams] = useSearchParams();
+  const section = params.get("section") === "tags" ? "tags" : "team";
+  const search = params.get("search") ?? "";
+  const page = Number(params.get("page") ?? 1);
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  const [pagination, setPagination] = useState<Pagination>({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
+  const toast = useToast();
 
-  const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
 
   const loadChatters = async () => {
-    const response = await api.get("/manager/chatters");
-    setChatters(response.data.chatters);
+    setLoading(true);
+    const response = await api.get("/manager/chatters", { params: { page, pageSize: 20, search: debouncedSearch || undefined } });
+    setChatters(response.data.items);
+    setPagination(response.data.pagination);
+    setError(null);
+    setLoading(false);
   };
 
   useEffect(() => {
-    void loadChatters();
-  }, []);
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    if (section !== "team") return;
+    void loadChatters()
+      .catch((requestError: unknown) => {
+        const apiError = requestError as { response?: { data?: { message?: string } } };
+        setError(apiError?.response?.data?.message ?? "Erro ao carregar chatters.");
+      })
+      .finally(() => setLoading(false));
+  }, [debouncedSearch, page, section]);
 
   const createChatter = async (event: FormEvent) => {
     event.preventDefault();
-    setError(null);
+
+    const trimmedName = name.trim();
+    if (trimmedName.length < 3) {
+      toast.error("O nome precisa ter pelo menos 3 caracteres.");
+      return;
+    }
 
     try {
       await api.post("/manager/users", {
-        username,
-        displayName,
+        username: trimmedName.toLowerCase(),
+        displayName: trimmedName,
         role: "CHATTER",
         password,
         isActive: true
       });
 
-      setUsername("");
-      setDisplayName("");
+      setName("");
       setPassword("");
       await loadChatters();
-    } catch (requestError: any) {
-      setError(requestError?.response?.data?.message ?? "Falha ao criar chatter.");
+      toast.success("Chatter criado com sucesso.");
+      setCreateOpen(false);
+    } catch (requestError: unknown) {
+      const message = getApiErrorMessage(requestError, "Falha ao criar chatter.", true);
+      toast.error(message);
     }
   };
 
-  const toggleActive = async (chatter: any) => {
-    await api.patch(`/manager/users/${chatter.id}`, {
-      isActive: !chatter.isActive
-    });
-    await loadChatters();
+  const toggleActive = async (chatter: ChatterListItem) => {
+    try {
+      await api.patch(`/manager/users/${chatter.id}`, {
+        isActive: !chatter.isActive
+      });
+      await loadChatters();
+      toast.success(chatter.isActive ? "Chatter desativado." : "Chatter ativado.");
+    } catch (requestError: unknown) {
+      toast.error(getApiErrorMessage(requestError, "Não foi possível atualizar o chatter."));
+    }
   };
 
   return (
     <section className="stack-gap">
-      <form className="card form-grid" onSubmit={createChatter}>
-        <h2>Novo chatter</h2>
-        <label>
-          Usuario
-          <input value={username} onChange={(event) => setUsername(event.target.value)} required />
-        </label>
-        <label>
-          Nome
-          <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required />
-        </label>
-        <label>
-          Senha inicial
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
-        <button className="primary-button" type="submit">
-          Criar chatter
+      <div className="page-header">
+        <div>
+          <h1>Chatters</h1>
+          <p>Gerencie a equipe, os acessos e as tags</p>
+        </div>
+      </div>
+      <div className="segmented manager-section-tabs" role="tablist" aria-label="Gerenciamento de chatters">
+        <button
+          type="button"
+          role="tab"
+          className={section === "team" ? "active" : ""}
+          aria-selected={section === "team"}
+          aria-controls="manager-chatters-panel"
+          onClick={() => setParams({})}
+        >
+          Equipe
         </button>
-      </form>
+        <button
+          type="button"
+          role="tab"
+          className={section === "tags" ? "active" : ""}
+          aria-selected={section === "tags"}
+          aria-controls="manager-tags-panel"
+          onClick={() => setParams({ section: "tags" })}
+        >
+          Tags e vínculos
+        </button>
+      </div>
 
-      <div className="card table-card">
+      {section === "tags" ? (
+        <div id="manager-tags-panel" role="tabpanel">
+          <ManagerTagsPage embedded />
+        </div>
+      ) : (
+        <div id="manager-chatters-panel" className="stack-gap" role="tabpanel">
+      <div className="list-action-row"><button className="primary-button" type="button" onClick={() => setCreateOpen(true)}>Novo chatter</button></div>
+
+      <ModalDialog open={createOpen} onClose={() => setCreateOpen(false)} ariaLabel="Criar chatter">
+        <form className="form-grid" onSubmit={createChatter}>
+          <h2>Novo chatter</h2>
+          <p>Crie o acesso com uma senha temporária. A troca será obrigatória no primeiro login.</p>
+          <label>Nome do chatter<input value={name} onChange={(event) => setName(event.target.value)} minLength={3} maxLength={100} autoFocus required /><small className="field-hint">Também será usado como login, em minúsculas.</small></label>
+          <label>Senha temporária<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required /><small className="field-hint">Use pelo menos 8 caracteres.</small></label>
+          <div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setCreateOpen(false)}>Cancelar</button><button className="primary-button" type="submit">Criar chatter</button></div>
+        </form>
+      </ModalDialog>
+
+      <div className="card table-card" tabIndex={0} aria-label="Tabela de chatters">
         <h2>Chatters</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Nome</th>
-              <th>Usuario</th>
-              <th>Total produzido</th>
-              <th>Status</th>
-              <th>Acoes</th>
-            </tr>
-          </thead>
-          <tbody>
+        <div className="list-toolbar">
+          <input
+            type="search"
+            placeholder="Buscar por nome..."
+            value={search}
+            onChange={(event) => setParams({ search: event.target.value, page: "1" })}
+            className="search-input"
+          />
+          <span className="list-count">
+            {pagination.total} {pagination.total === 1 ? "chatter" : "chatters"}
+          </span>
+        </div>
+        {loading ? (
+          <div className="skeleton-list">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
+        ) : (
+          <div className="chatter-table">
+            <span className="cell head">Usuario</span>
+            <span className="cell head">Total produzido</span>
+            <span className="cell head right">Status</span>
+            <span className="cell head center">Acoes</span>
             {chatters.map((chatter) => (
-              <tr key={chatter.id}>
-                <td>{chatter.displayName}</td>
-                <td>{chatter.username}</td>
-                <td>{chatter.totalGrossFormatted}</td>
-                <td>{chatter.isActive ? "Ativo" : "Inativo"}</td>
-                <td>
+              <Fragment key={chatter.id}>
+                <span className="cell name">{chatter.displayName}</span>
+                <span className="cell">{chatter.totalGrossFormatted}</span>
+                <span className="cell right">
+                  <span className={chatter.isActive ? "status-badge paid" : "status-badge"}>
+                    {chatter.isActive ? "Ativo" : "Inativo"}
+                  </span>
+                </span>
+                <span className="cell center">
+                  <Link to={`/chatters/${chatter.id}`} className="secondary-button">
+                    Detalhes
+                  </Link>
                   <button className="secondary-button" onClick={() => void toggleActive(chatter)}>
                     {chatter.isActive ? "Desativar" : "Ativar"}
                   </button>
-                </td>
-              </tr>
+                </span>
+              </Fragment>
             ))}
-          </tbody>
-        </table>
+            {!loading && chatters.length === 0 ? (
+              <p className="empty-hint">{search ? "Nenhum chatter encontrado com essa busca." : "Nenhum chatter cadastrado."}</p>
+            ) : null}
+          </div>
+        )}
+        {pagination.totalPages > 1 ? <div className="pagination">
+          <button className="secondary-button" disabled={pagination.page <= 1} onClick={() => setParams({ search, page: String(page - 1) })}>Anterior</button>
+          <span>Página {pagination.page} de {pagination.totalPages}</span>
+          <button className="secondary-button" disabled={pagination.page >= pagination.totalPages} onClick={() => setParams({ search, page: String(page + 1) })}>Próxima</button>
+        </div> : null}
       </div>
 
       {error ? <div className="error-box">{error}</div> : null}
+        </div>
+      )}
     </section>
   );
 };

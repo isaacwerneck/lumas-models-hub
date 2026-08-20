@@ -1,9 +1,14 @@
-import { AuditAction, PaymentStatus, Role } from "@prisma/client";
+import { AuditAction, EarningsStatus, Prisma, Role } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { hashPassword } from "../../utils/password";
 import { centsToBrl } from "../../utils/currency";
-import { getWeekRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
+import { computeMph, formatHours, getReportedShiftDurationMs } from "../mph/mph";
+import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pagination";
+import { auditRequestMetadata } from "../../utils/audit";
+import { processStorageDeletionJobs, queueEvidencePurge } from "../../services/evidence-cleanup";
+import { PAYMENTS_UPDATED_EVENT } from "./manager.events";
+import { businessDateKey, businessDateKeysInclusive } from "../../utils/time";
 
 const ensureManagerRole = (role: Role) => role === Role.MANAGER;
 
@@ -26,6 +31,8 @@ const userIdParamsSchema = z.object({
   userId: z.string().min(1)
 });
 
+const resetPasswordSchema = z.object({ password: z.string().min(8).max(128) });
+
 const tagCreateSchema = z.object({
   name: z.string().min(2).max(80)
 });
@@ -43,12 +50,52 @@ const chatterTagUpdateSchema = z.object({
   modelTagIds: z.array(z.string().min(1)).max(100)
 });
 
-const payoutParamsSchema = z.object({
-  payoutId: z.string().min(1)
+const paySchema = z.object({
+  chatterId: z.string().min(1)
 });
 
-const forcePaySchema = z.object({
-  reason: z.string().min(3).max(300)
+const analyticsQuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  modelTagId: z.string().min(1).optional(),
+  chatterId: z.string().min(1).optional()
+});
+
+const shiftNotesSchema = z.object({
+  notes: z.string().max(500)
+});
+
+const shiftIdParamsSchema = z.object({
+  shiftId: z.string().min(1)
+});
+
+const chatterListQuerySchema = paginationSchema.extend({
+  search: z.string().trim().max(100).optional(),
+  status: z.enum(["all", "active", "inactive"]).default("all"),
+  modelTagId: z.string().min(1).optional()
+});
+
+const shiftListQuerySchema = paginationSchema.extend({
+  search: z.string().trim().max(100).optional(),
+  status: z.enum(["OPEN", "CLOSED"]).optional(),
+  modelTagId: z.string().min(1).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
+});
+
+const paymentListQuerySchema = paginationSchema.extend({
+  search: z.string().trim().max(100).optional(),
+  chatterId: z.string().min(1).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
+});
+
+const auditListQuerySchema = paginationSchema.extend({
+  action: z.nativeEnum(AuditAction).optional(),
+  actorId: z.string().min(1).optional(),
+  user: z.string().trim().max(100).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
 });
 
 const managerRoutes: FastifyPluginAsync = async (fastify) => {
@@ -59,13 +106,25 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
-    const chatters = await fastify.prisma.user.findMany({
-      where: {
-        role: Role.CHATTER
-      },
-      orderBy: {
-        displayName: "asc"
-      },
+    const query = chatterListQuerySchema.parse(request.query);
+    const where: Prisma.UserWhereInput = {
+      role: Role.CHATTER,
+      ...(query.search
+        ? {
+            OR: [
+              { displayName: { contains: query.search, mode: "insensitive" } },
+              { username: { contains: query.search, mode: "insensitive" } }
+            ]
+          }
+        : {}),
+      ...(query.status === "active" ? { isActive: true } : query.status === "inactive" ? { isActive: false } : {}),
+      ...(query.modelTagId ? { chatterModelTags: { some: { modelTagId: query.modelTagId } } } : {})
+    };
+    const isV1 = request.url.startsWith("/api/v1/");
+    const [chatters, total] = await fastify.prisma.$transaction([
+      fastify.prisma.user.findMany({
+      where,
+      orderBy: [{ displayName: "asc" }, { id: "asc" }],
       include: {
         chatterModelTags: {
           include: {
@@ -83,8 +142,11 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
             shifts: true
           }
         }
-      }
-    });
+      },
+      ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
+      }),
+      fastify.prisma.user.count({ where })
+    ]);
 
     const chatterIds = chatters.map((chatter) => chatter.id);
 
@@ -114,8 +176,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       ])
     );
 
-    return {
-      chatters: chatters.map((chatter) => {
+    const items = chatters.map((chatter) => {
         const sums = sumByChatter.get(chatter.id) ?? {
           grossAmountCents: 0,
           payoutAmountCents: 0
@@ -139,23 +200,206 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
             isActive: link.modelTag.isActive
           }))
         };
-      })
-    };
+      });
+
+    return { chatters: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
   });
 
-  fastify.post("/users", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.get("/chatters/:userId/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { role: Role };
 
     if (!ensureManagerRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
-    const body = userCreateSchema.parse(request.body);
+    const params = userIdParamsSchema.parse(request.params);
 
-    const existing = await fastify.prisma.user.findUnique({
-      where: {
-        username: body.username
+    const chatter = await fastify.prisma.user.findFirst({
+      where: { id: params.userId, role: Role.CHATTER },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        isActive: true,
+        createdAt: true
       }
+    });
+
+    if (!chatter) {
+      return reply.code(404).send({ message: "Chatter não encontrado." });
+    }
+
+    const [links, shifts, payments] = await Promise.all([
+      fastify.prisma.chatterModelTag.findMany({
+        where: { chatterId: chatter.id },
+        include: {
+          modelTag: {
+            select: { id: true, name: true, isActive: true }
+          }
+        }
+      }),
+      fastify.prisma.shift.findMany({
+        where: { chatterId: chatter.id },
+        orderBy: { startedAt: "desc" },
+        include: {
+          modelTag: { select: { id: true, name: true } },
+          earnings: true,
+          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } }
+        }
+      }),
+      fastify.prisma.paymentHistory.findMany({
+        where: { chatterId: chatter.id },
+        orderBy: { paidAt: "desc" },
+        include: {
+          manager: { select: { id: true, displayName: true } }
+        }
+      })
+    ]);
+
+    return {
+      chatter,
+      modelTags: links.map((item) => item.modelTag),
+      shifts: shifts.map((shift) => ({
+        id: shift.id,
+        modelTag: shift.modelTag,
+        status: shift.status,
+        startedAt: shift.startedAt,
+        endedAt: shift.endedAt,
+        startImageUrl: shift.startImageUrl,
+        startEvidence: shift.startEvidence,
+        startValueCents: shift.startValueCents,
+        startValueFormatted: centsToBrl(shift.startValueCents),
+        startValueConfirmedAt: shift.startValueConfirmedAt,
+        endImageUrl: shift.endImageUrl,
+        endEvidence: shift.endEvidence,
+        endValueCents: shift.endValueCents,
+        endValueFormatted: shift.endValueCents !== null ? centsToBrl(shift.endValueCents) : null,
+        endValueConfirmedAt: shift.endValueConfirmedAt,
+        grossAmountCents: shift.grossAmountCents,
+        grossAmountFormatted: shift.grossAmountCents !== null ? centsToBrl(shift.grossAmountCents) : null,
+        payoutAmountCents: shift.payoutAmountCents,
+        payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null,
+        negativeJustification: shift.negativeJustification,
+        notes: shift.notes,
+        earnings: shift.earnings
+          ? {
+              amountCents: shift.earnings.amountCents,
+              amountFormatted: centsToBrl(shift.earnings.amountCents),
+              status: shift.earnings.status,
+              paidAt: shift.earnings.paidAt
+            }
+          : null
+      })),
+      payments: payments.map((item) => ({
+        id: item.id,
+        totalCents: item.totalCents,
+        totalFormatted: centsToBrl(item.totalCents),
+        paidAt: item.paidAt,
+        manager: item.manager
+      }))
+    };
+  });
+
+  fastify.get("/chatters/:userId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const params = userIdParamsSchema.parse(request.params);
+    const chatter = await fastify.prisma.user.findFirst({
+      where: { id: params.userId, role: Role.CHATTER },
+      select: {
+        id: true, username: true, displayName: true, isActive: true, createdAt: true,
+        chatterModelTags: { include: { modelTag: { select: { id: true, name: true, isActive: true } } } }
+      }
+    });
+    if (!chatter) return reply.code(404).send({ message: "Chatter não encontrado." });
+    return { chatter: { ...chatter, modelTags: chatter.chatterModelTags.map((link) => link.modelTag), chatterModelTags: undefined } };
+  });
+
+  fastify.get("/chatters/:userId/shifts", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const params = userIdParamsSchema.parse(request.params);
+    const query = shiftListQuerySchema.parse(request.query);
+    const where: Prisma.ShiftWhereInput = {
+      chatterId: params.userId,
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.modelTagId ? { modelTagId: query.modelTagId } : {}),
+      ...(query.search ? { modelTag: { name: { contains: query.search, mode: "insensitive" } } } : {}),
+      ...(query.from || query.to
+        ? { startedAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const [items, total, chatterExists] = await fastify.prisma.$transaction([
+      fastify.prisma.shift.findMany({
+        where,
+        include: {
+          modelTag: { select: { id: true, name: true } }, earnings: true,
+          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } }
+        },
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        ...paginationArgs(query.page, query.pageSize)
+      }),
+      fastify.prisma.shift.count({ where }),
+      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER } })
+    ]);
+    if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
+    return {
+      items: items.map((shift) => ({
+        ...shift,
+        startValueFormatted: centsToBrl(shift.startValueCents),
+        endValueFormatted: shift.endValueCents === null ? null : centsToBrl(shift.endValueCents),
+        grossAmountFormatted: shift.grossAmountCents === null ? null : centsToBrl(shift.grossAmountCents),
+        payoutAmountFormatted: shift.payoutAmountCents === null ? null : centsToBrl(shift.payoutAmountCents),
+        earnings: shift.earnings
+          ? { ...shift.earnings, amountFormatted: centsToBrl(shift.earnings.amountCents) }
+          : null
+      })),
+      pagination: paginationMeta(query.page, query.pageSize, total)
+    };
+  });
+
+  fastify.get("/chatters/:userId/payments", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const params = userIdParamsSchema.parse(request.params);
+    const query = paymentListQuerySchema.parse(request.query);
+    const where: Prisma.PaymentHistoryWhereInput = {
+      chatterId: params.userId,
+      ...(query.from || query.to
+        ? { paidAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const [items, total, chatterExists] = await fastify.prisma.$transaction([
+      fastify.prisma.paymentHistory.findMany({
+        where,
+        include: { manager: { select: { id: true, displayName: true } } },
+        orderBy: [{ paidAt: "desc" }, { id: "desc" }],
+        ...paginationArgs(query.page, query.pageSize)
+      }),
+      fastify.prisma.paymentHistory.count({ where }),
+      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER } })
+    ]);
+    if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
+    return {
+      items: items.map((item) => ({ ...item, totalFormatted: centsToBrl(item.totalCents) })),
+      pagination: paginationMeta(query.page, query.pageSize, total)
+    };
+  });
+
+  fastify.post("/users", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const parsedBody = userCreateSchema.parse(request.body);
+    const body = { ...parsedBody, username: parsedBody.username.trim().toLowerCase(), displayName: parsedBody.displayName.trim() };
+
+    const existing = await fastify.prisma.user.findFirst({
+      where: { username: { equals: body.username, mode: "insensitive" } }
     });
 
     if (existing) {
@@ -164,22 +408,33 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
 
     const passwordHash = await hashPassword(body.password);
 
-    const user = await fastify.prisma.user.create({
-      data: {
-        username: body.username,
-        displayName: body.displayName,
-        role: body.role,
-        isActive: body.isActive,
-        passwordHash
-      },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        role: true,
-        isActive: true,
-        createdAt: true
-      }
+    const user = await fastify.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          username: body.username,
+          displayName: body.displayName,
+          role: body.role,
+          isActive: body.isActive,
+          passwordHash,
+          mustChangePassword: true
+        },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          role: true,
+          isActive: true,
+          createdAt: true
+        }
+      });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub,
+        action: AuditAction.USER_CREATED,
+        targetType: "User",
+        targetId: created.id,
+        metadata: { username: created.username, role: created.role, ...auditRequestMetadata(request) }
+      } });
+      return created;
     });
 
     return reply.code(201).send({ user });
@@ -214,6 +469,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       role?: Role;
       isActive?: boolean;
       passwordHash?: string;
+      authVersion?: { increment: number };
+      mustChangePassword?: boolean;
     } = {};
 
     if (body.displayName !== undefined) {
@@ -227,7 +484,9 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     }
     if (body.password) {
       data.passwordHash = await hashPassword(body.password);
+      data.mustChangePassword = true;
     }
+    if (body.password || body.role !== undefined || body.isActive === false) data.authVersion = { increment: 1 };
 
     const updated = await fastify.prisma.$transaction(async (tx) => {
       const user = await tx.user.update({
@@ -245,7 +504,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         }
       });
 
-      if (body.password || body.isActive === false) {
+      if (body.password || body.role !== undefined || body.isActive === false) {
         await tx.refreshSession.updateMany({
           where: {
             userId: targetUser.id,
@@ -257,10 +516,84 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      await tx.auditLog.create({
+        data: {
+          actorId: authUser.sub,
+          action: AuditAction.USER_UPDATED,
+          targetType: "User",
+          targetId: targetUser.id,
+          metadata: {
+            username: targetUser.username,
+            ...auditRequestMetadata(request),
+            changes: {
+              displayName: body.displayName,
+              role: body.role,
+              isActive: body.isActive,
+              passwordChanged: Boolean(body.password)
+            }
+          }
+        }
+      });
+
       return user;
     });
 
+    if (body.password || body.role !== undefined || body.isActive === false) {
+      fastify.io.in(`user:${targetUser.id}`).disconnectSockets(true);
+    }
+
     return { user: updated };
+  });
+
+  fastify.post("/users/:userId/reset-password", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const params = userIdParamsSchema.parse(request.params);
+    const body = resetPasswordSchema.parse(request.body);
+    const target = await fastify.prisma.user.findUnique({ where: { id: params.userId }, select: { id: true, username: true } });
+    if (!target) return reply.code(404).send({ message: "Usuário não encontrado." });
+    const passwordHash = await hashPassword(body.password);
+    await fastify.prisma.$transaction([
+      fastify.prisma.user.update({ where: { id: target.id }, data: { passwordHash, mustChangePassword: true, authVersion: { increment: 1 } } }),
+      fastify.prisma.refreshSession.updateMany({ where: { userId: target.id, revokedAt: null }, data: { revokedAt: new Date() } }),
+      fastify.prisma.auditLog.create({ data: { actorId: authUser.sub, action: AuditAction.PASSWORD_RESET, targetType: "User", targetId: target.id, metadata: { username: target.username, ...auditRequestMetadata(request) } } })
+    ]);
+    fastify.io.in(`user:${target.id}`).disconnectSockets(true);
+    return { success: true, mustChangePassword: true };
+  });
+
+  fastify.patch("/shifts/:shiftId/notes", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const params = shiftIdParamsSchema.parse(request.params);
+    const body = shiftNotesSchema.parse(request.body);
+
+    const shift = await fastify.prisma.shift.findFirst({
+      where: { id: params.shiftId }
+    });
+
+    if (!shift) {
+      return reply.code(404).send({ message: "Turno não encontrado." });
+    }
+
+    const notes = body.notes.trim() === "" ? null : body.notes.trim();
+    const updated = await fastify.prisma.$transaction(async (tx) => {
+      const result = await tx.shift.update({
+        where: { id: shift.id }, data: { notes }, select: { id: true, notes: true }
+      });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.SHIFT_NOTES_UPDATED,
+        targetType: "Shift", targetId: shift.id,
+        metadata: { notesPresent: Boolean(notes), ...auditRequestMetadata(request) }
+      } });
+      return result;
+    });
+
+    return { shift: updated };
   });
 
   fastify.get("/tags", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -296,43 +629,46 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.post("/tags", { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const authUser = request.user as { role: Role };
+    const authUser = request.user as { role: Role; sub: string };
 
     if (!ensureManagerRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
-    const body = tagCreateSchema.parse(request.body);
+    const parsedBody = tagCreateSchema.parse(request.body);
+    const body = { ...parsedBody, name: parsedBody.name.trim() };
 
-    const exists = await fastify.prisma.modelTag.findUnique({
-      where: {
-        name: body.name
-      }
+    const exists = await fastify.prisma.modelTag.findFirst({
+      where: { name: { equals: body.name, mode: "insensitive" } }
     });
 
     if (exists) {
       return reply.code(409).send({ message: "Já existe uma tag com esse nome." });
     }
 
-    const tag = await fastify.prisma.modelTag.create({
-      data: {
-        name: body.name,
-        isActive: true
-      }
+    const tag = await fastify.prisma.$transaction(async (tx) => {
+      const created = await tx.modelTag.create({ data: { name: body.name, isActive: true } });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.TAG_CREATED,
+        targetType: "ModelTag", targetId: created.id,
+        metadata: { name: created.name, ...auditRequestMetadata(request) }
+      } });
+      return created;
     });
 
     return reply.code(201).send({ tag });
   });
 
   fastify.patch("/tags/:tagId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const authUser = request.user as { role: Role };
+    const authUser = request.user as { role: Role; sub: string };
 
     if (!ensureManagerRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
     const params = tagIdParamsSchema.parse(request.params);
-    const body = tagUpdateSchema.parse(request.body);
+    const parsedBody = tagUpdateSchema.parse(request.body);
+    const body = { ...parsedBody, name: parsedBody.name?.trim() };
 
     const tag = await fastify.prisma.modelTag.findUnique({
       where: {
@@ -345,10 +681,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (body.name && body.name !== tag.name) {
-      const existingName = await fastify.prisma.modelTag.findUnique({
-        where: {
-          name: body.name
-        }
+      const existingName = await fastify.prisma.modelTag.findFirst({
+        where: { id: { not: tag.id }, name: { equals: body.name, mode: "insensitive" } }
       });
 
       if (existingName) {
@@ -356,17 +690,59 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const updated = await fastify.prisma.modelTag.update({
-      where: {
-        id: tag.id
-      },
-      data: {
-        name: body.name,
-        isActive: body.isActive
-      }
+    const updated = await fastify.prisma.$transaction(async (tx) => {
+      const result = await tx.modelTag.update({
+        where: { id: tag.id }, data: { name: body.name, isActive: body.isActive }
+      });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.TAG_UPDATED,
+        targetType: "ModelTag", targetId: tag.id,
+        metadata: {
+          before: { name: tag.name, isActive: tag.isActive },
+          after: { name: result.name, isActive: result.isActive },
+          ...auditRequestMetadata(request)
+        }
+      } });
+      return result;
     });
 
     return { tag: updated };
+  });
+
+  fastify.delete("/tags/:tagId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const params = tagIdParamsSchema.parse(request.params);
+
+    const tag = await fastify.prisma.modelTag.findUnique({
+      where: { id: params.tagId },
+      include: { _count: { select: { shifts: true, messages: true } } }
+    });
+
+    if (!tag) {
+      return reply.code(404).send({ message: "Tag não encontrada." });
+    }
+
+    if (tag._count.shifts > 0 || tag._count.messages > 0) {
+      return reply.code(409).send({
+        message: "Esta tag possui turnos ou mensagens vinculados. Desative-a em vez de excluí-la."
+      });
+    }
+
+    await fastify.prisma.$transaction([
+      fastify.prisma.modelTag.delete({ where: { id: params.tagId } }),
+      fastify.prisma.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.TAG_DELETED,
+        targetType: "ModelTag", targetId: tag.id,
+        metadata: { name: tag.name, ...auditRequestMetadata(request) }
+      } })
+    ]);
+
+    return reply.code(204).send();
   });
 
   fastify.put("/chatters/:userId/tags", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -395,9 +771,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const existingTags = uniqueTagIds.length
       ? await fastify.prisma.modelTag.findMany({
           where: {
-            id: {
-              in: uniqueTagIds
-            }
+            id: { in: uniqueTagIds },
+            isActive: true
           },
           select: {
             id: true
@@ -442,7 +817,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
           targetId: chatter.id,
           metadata: {
             beforeModelTagIds: beforeLinks.map((item) => item.modelTagId),
-            afterModelTagIds: uniqueTagIds
+            afterModelTagIds: uniqueTagIds,
+            ...auditRequestMetadata(request)
           }
         }
       });
@@ -469,149 +845,379 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  fastify.get("/payments/confirmed", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.get("/payments/balances", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { role: Role };
 
     if (!ensureManagerRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
-    const weekRange = getWeekRangeInBusinessTz();
-
-    const payouts = await fastify.prisma.weeklyPayout.findMany({
-      where: {
-        weekStartDate: weekRange.weekStart,
-        status: PaymentStatus.CHATTER_CONFIRMED
-      },
-      include: {
-        chatter: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true
-          }
-        }
-      },
-      orderBy: {
-        chatterConfirmedAt: "asc"
-      }
-    });
-
-    return {
-      weekStartDate: weekRange.weekStart,
-      weekEndDate: weekRange.weekEnd,
-      payouts: payouts.map((payout) => ({
-        id: payout.id,
-        chatter: payout.chatter,
-        status: payout.status,
-        weekGrossCents: payout.weekGrossCents,
-        weekGrossFormatted: centsToBrl(payout.weekGrossCents),
-        weekPayoutCents: payout.weekPayoutCents,
-        weekPayoutFormatted: centsToBrl(payout.weekPayoutCents),
-        chatterConfirmedAt: payout.chatterConfirmedAt
-      }))
+    const query = chatterListQuerySchema.parse(request.query);
+    const where: Prisma.UserWhereInput = {
+      role: Role.CHATTER,
+      ...(query.search ? { displayName: { contains: query.search, mode: "insensitive" } } : {}),
+      ...(query.status === "active" ? { isActive: true } : query.status === "inactive" ? { isActive: false } : {})
     };
-  });
+    const isV1 = request.url.startsWith("/api/v1/");
+    const [chatters, total] = await fastify.prisma.$transaction([
+      fastify.prisma.user.findMany({
+        where, orderBy: [{ displayName: "asc" }, { id: "asc" }],
+        select: { id: true, displayName: true, isActive: true },
+        ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
+      }),
+      fastify.prisma.user.count({ where })
+    ]);
 
-  fastify.post("/payments/:payoutId/mark-paid", { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const authUser = request.user as { role: Role; sub: string };
+    const chatterIds = chatters.map((chatter) => chatter.id);
 
-    if (!ensureManagerRole(authUser.role)) {
-      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
-    }
-
-    const params = payoutParamsSchema.parse(request.params);
-
-    const payout = await fastify.prisma.weeklyPayout.findUnique({
+    const pendingAgg = await fastify.prisma.earnings.groupBy({
+      by: ["chatterId"],
       where: {
-        id: params.payoutId
-      }
-    });
-
-    if (!payout) {
-      return reply.code(404).send({ message: "Pagamento semanal não encontrado." });
-    }
-
-    if (payout.status !== PaymentStatus.CHATTER_CONFIRMED) {
-      return reply.code(400).send({
-        message: "Este endpoint só permite confirmar pagamentos já validados pelo chatter."
-      });
-    }
-
-    const now = nowInBusinessTz().toDate();
-
-    const updated = await fastify.prisma.weeklyPayout.update({
-      where: {
-        id: payout.id
+        chatterId: { in: chatterIds },
+        status: EarningsStatus.PENDING
       },
-      data: {
-        status: PaymentStatus.PAID,
-        paidAt: now,
-        paidById: authUser.sub,
-        forcedById: null
-      }
+      _sum: { amountCents: true }
     });
 
-    return { payout: updated };
+    const pendingByChatter = new Map(
+      pendingAgg.map((item) => [item.chatterId, item._sum.amountCents ?? 0])
+    );
+
+    const items = chatters.map((chatter) => {
+        const pendingCents = pendingByChatter.get(chatter.id) ?? 0;
+        return {
+          id: chatter.id,
+          displayName: chatter.displayName,
+          isActive: chatter.isActive,
+          pendingCents,
+          pendingFormatted: centsToBrl(pendingCents)
+        };
+      });
+    return { chatters: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
   });
 
-  fastify.post("/payments/:payoutId/force-pay", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.post("/payments/pay", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { role: Role; sub: string };
 
     if (!ensureManagerRole(authUser.role)) {
       return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     }
 
-    const params = payoutParamsSchema.parse(request.params);
-    const body = forcePaySchema.parse(request.body);
+    const body = paySchema.parse(request.body);
+    const requestKeyHeader = request.headers["idempotency-key"];
+    const requestKey = typeof requestKeyHeader === "string" && requestKeyHeader.length <= 100 ? requestKeyHeader : undefined;
 
-    const payout = await fastify.prisma.weeklyPayout.findUnique({
-      where: {
-        id: params.payoutId
-      }
+    const chatter = await fastify.prisma.user.findFirst({
+      where: { id: body.chatterId, role: Role.CHATTER }
     });
 
-    if (!payout) {
-      return reply.code(404).send({ message: "Pagamento semanal não encontrado." });
+    if (!chatter) {
+      return reply.code(404).send({ message: "Chatter não encontrado." });
     }
 
-    if (payout.status === PaymentStatus.PAID || payout.status === PaymentStatus.FORCED_PAID) {
-      return reply.code(400).send({ message: "Este pagamento já foi concluído." });
-    }
-
-    const now = nowInBusinessTz().toDate();
-
-    const updated = await fastify.prisma.$transaction(async (tx) => {
-      const forced = await tx.weeklyPayout.update({
-        where: {
-          id: payout.id
-        },
+    const now = new Date();
+    let result;
+    try {
+      result = await fastify.prisma.$transaction(async (tx) => {
+      if (requestKey) {
+        const previous = await tx.paymentHistory.findUnique({ where: { requestKey } });
+        if (previous) return { payment: previous, purgedEvidenceCount: 0, idempotent: true };
+      }
+      const pending = await tx.earnings.findMany({
+        where: { chatterId: chatter.id, status: EarningsStatus.PENDING },
+        select: { id: true, shiftId: true, amountCents: true },
+        orderBy: { id: "asc" }
+      });
+      if (!pending.length) throw new Error("NO_PENDING_EARNINGS");
+      const totalCents = pending.reduce((acc, item) => acc + item.amountCents, 0);
+      const created = await tx.paymentHistory.create({
         data: {
-          status: PaymentStatus.FORCED_PAID,
-          paidAt: now,
-          paidById: authUser.sub,
-          forcedById: authUser.sub
+          chatterId: chatter.id,
+          managerId: authUser.sub,
+          totalCents,
+          requestKey
         }
       });
+      const paid = await tx.earnings.updateMany({
+        where: { id: { in: pending.map((item) => item.id) }, status: EarningsStatus.PENDING },
+        data: { status: EarningsStatus.PAID, paidAt: now, paymentId: created.id }
+      });
+      if (paid.count !== pending.length) throw new Error("CONCURRENT_PAYMENT");
+
+      const shifts = await tx.shift.findMany({
+        where: { id: { in: pending.map((item) => item.shiftId) } },
+        select: { startEvidenceId: true, endEvidenceId: true }
+      });
+      const evidenceIds = shifts.flatMap((item) => [item.startEvidenceId, item.endEvidenceId]).filter((id): id is string => Boolean(id));
+      const purgedEvidenceCount = await queueEvidencePurge(tx, evidenceIds);
 
       await tx.auditLog.create({
         data: {
           actorId: authUser.sub,
-          action: AuditAction.PAYMENT_FORCED,
-          targetType: "WeeklyPayout",
-          targetId: payout.id,
+          action: AuditAction.PAYMENT_MADE,
+          targetType: "User",
+          targetId: chatter.id,
           metadata: {
-            reason: body.reason,
-            previousStatus: payout.status,
-            forcedAt: now
+            chatterUsername: chatter.username,
+            totalCents,
+            paymentId: created.id,
+            earningsCount: pending.length,
+            purgedEvidenceCount,
+            ...auditRequestMetadata(request)
           }
         }
       });
 
-      return forced;
+      return { payment: created, purgedEvidenceCount, idempotent: false };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if ((error as Error).message === "NO_PENDING_EARNINGS") return reply.code(400).send({ message: "Este chatter não possui saldo pendente." });
+      if ((error as Error).message === "CONCURRENT_PAYMENT" || (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code))) {
+        return reply.code(409).send({ message: "O saldo foi alterado por outro pagamento. Atualize e tente novamente." });
+      }
+      throw error;
+    }
+
+    void processStorageDeletionJobs(fastify);
+    fastify.io.to(`user:${chatter.id}`).emit(PAYMENTS_UPDATED_EVENT, { chatterId: chatter.id, paymentId: result.payment.id });
+    fastify.io.to("role:manager").emit(PAYMENTS_UPDATED_EVENT, { chatterId: chatter.id, paymentId: result.payment.id });
+
+    return {
+      payment: {
+        id: result.payment.id,
+        totalCents: result.payment.totalCents,
+        totalFormatted: centsToBrl(result.payment.totalCents),
+        paidAt: result.payment.paidAt
+      },
+      purgedEvidenceCount: result.purgedEvidenceCount,
+      idempotent: result.idempotent
+    };
+  });
+
+  fastify.get("/payments/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const query = paymentListQuerySchema.parse(request.query);
+    const where: Prisma.PaymentHistoryWhereInput = {
+      ...(query.chatterId ? { chatterId: query.chatterId } : {}),
+      ...(query.search ? { chatter: { displayName: { contains: query.search, mode: "insensitive" } } } : {}),
+      ...(query.from || query.to
+        ? { paidAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const isV1 = request.url.startsWith("/api/v1/");
+    const [history, total] = await fastify.prisma.$transaction([
+      fastify.prisma.paymentHistory.findMany({
+      where,
+      orderBy: [{ paidAt: "desc" }, { id: "desc" }],
+      include: {
+        chatter: { select: { id: true, displayName: true } },
+        manager: { select: { id: true, displayName: true } }
+      },
+      ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
+      }),
+      fastify.prisma.paymentHistory.count({ where })
+    ]);
+
+    const items = history.map((item) => ({
+        id: item.id,
+        chatter: item.chatter,
+        manager: item.manager,
+        totalCents: item.totalCents,
+        totalFormatted: centsToBrl(item.totalCents),
+        paidAt: item.paidAt
+      }));
+    return { history: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
+  });
+
+  fastify.get("/audit-logs", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const query = auditListQuerySchema.parse(request.query);
+    const where: Prisma.AuditLogWhereInput = {
+      ...(query.action ? { action: query.action } : {}),
+      ...(query.actorId ? { actorId: query.actorId } : {}),
+      ...(query.user ? { actor: { OR: [
+        { username: { contains: query.user, mode: "insensitive" } },
+        { displayName: { contains: query.user, mode: "insensitive" } }
+      ] } } : {}),
+      ...(query.from || query.to
+        ? { createdAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lt: new Date(query.to) } : {}) } }
+        : {})
+    };
+    const [items, total] = await fastify.prisma.$transaction([
+      fastify.prisma.auditLog.findMany({
+        where,
+        include: { actor: { select: { id: true, username: true, displayName: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        ...paginationArgs(query.page, query.pageSize)
+      }),
+      fastify.prisma.auditLog.count({ where })
+    ]);
+    return { items, pagination: paginationMeta(query.page, query.pageSize, total) };
+  });
+
+  fastify.get("/analytics", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const query = analyticsQuerySchema.parse(request.query);
+
+    const where: Prisma.ShiftWhereInput = {
+      status: "CLOSED",
+      grossAmountCents: { not: null }
+    };
+
+    if (query.from || query.to) {
+      where.endedAt = {
+        ...(query.from ? { gte: new Date(query.from) } : {}),
+        ...(query.to ? { lt: new Date(query.to) } : {})
+      };
+    } else {
+      where.endedAt = { not: null };
+    }
+
+    if (query.modelTagId) {
+      where.modelTagId = query.modelTagId;
+    }
+    if (query.chatterId) {
+      where.chatterId = query.chatterId;
+    }
+
+    const shifts = await fastify.prisma.shift.findMany({
+      where,
+      select: {
+        chatterId: true,
+        modelTagId: true,
+        startedAt: true,
+        endedAt: true,
+        grossAmountCents: true,
+        payoutAmountCents: true,
+        chatter: {
+          select: { id: true, displayName: true, username: true, isActive: true }
+        },
+        modelTag: {
+          select: { id: true, name: true, isActive: true }
+        }
+      }
     });
 
-    return { payout: updated };
+    const byModel = new Map<string, { modelTag: { id: string; name: string; isActive: boolean }; grossCents: number; payoutCents: number; hoursMs: number; shiftCount: number }>();
+    const byChatter = new Map<string, { chatter: { id: string; displayName: string; username: string; isActive: boolean }; grossCents: number; payoutCents: number; hoursMs: number; shiftCount: number }>();
+    const daily = new Map<string, { date: string; grossCents: number; payoutCents: number; hoursMs: number; shiftCount: number }>();
+
+    let totalGrossCents = 0;
+    let totalPayoutCents = 0;
+    let totalHoursMs = 0;
+    let shiftCount = 0;
+
+    for (const shift of shifts) {
+      if (!shift.endedAt || shift.grossAmountCents === null) {
+        continue;
+      }
+
+      const hoursMs = getReportedShiftDurationMs(shift.startedAt, shift.endedAt);
+      if (hoursMs === null) {
+        continue;
+      }
+
+      const gross = shift.grossAmountCents;
+      const payout = shift.payoutAmountCents ?? 0;
+
+      totalGrossCents += gross;
+      totalPayoutCents += payout;
+      totalHoursMs += hoursMs;
+      shiftCount += 1;
+
+      const modelEntry = byModel.get(shift.modelTagId) ?? {
+        modelTag: shift.modelTag,
+        grossCents: 0,
+        payoutCents: 0,
+        hoursMs: 0,
+        shiftCount: 0
+      };
+      modelEntry.grossCents += gross;
+      modelEntry.payoutCents += payout;
+      modelEntry.hoursMs += hoursMs;
+      modelEntry.shiftCount += 1;
+      byModel.set(shift.modelTagId, modelEntry);
+
+      const chatterEntry = byChatter.get(shift.chatterId) ?? {
+        chatter: shift.chatter,
+        grossCents: 0,
+        payoutCents: 0,
+        hoursMs: 0,
+        shiftCount: 0
+      };
+      chatterEntry.grossCents += gross;
+      chatterEntry.payoutCents += payout;
+      chatterEntry.hoursMs += hoursMs;
+      chatterEntry.shiftCount += 1;
+      byChatter.set(shift.chatterId, chatterEntry);
+
+      const dayKey = businessDateKey(shift.endedAt);
+      const dayEntry = daily.get(dayKey) ?? { date: dayKey, grossCents: 0, payoutCents: 0, hoursMs: 0, shiftCount: 0 };
+      dayEntry.grossCents += gross;
+      dayEntry.payoutCents += payout;
+      dayEntry.hoursMs += hoursMs;
+      dayEntry.shiftCount += 1;
+      daily.set(dayKey, dayEntry);
+    }
+
+    const summary = {
+      totalPayoutCents,
+      totalPayoutFormatted: centsToBrl(totalPayoutCents),
+      shiftCount,
+      ...computeMph(totalGrossCents, totalHoursMs)
+    };
+
+    const byModelList = Array.from(byModel.values())
+      .map((entry) => ({
+        modelTag: entry.modelTag,
+        grossCents: entry.grossCents,
+        grossFormatted: centsToBrl(entry.grossCents),
+        payoutCents: entry.payoutCents,
+        payoutFormatted: centsToBrl(entry.payoutCents),
+        hoursMs: entry.hoursMs,
+        hoursFormatted: formatHours(entry.hoursMs),
+        shiftCount: entry.shiftCount,
+        ...computeMph(entry.grossCents, entry.hoursMs)
+      }))
+      .sort((a, b) => b.grossCents - a.grossCents);
+
+    const byChatterList = Array.from(byChatter.values())
+      .map((entry) => ({
+        chatter: entry.chatter,
+        grossCents: entry.grossCents,
+        grossFormatted: centsToBrl(entry.grossCents),
+        payoutCents: entry.payoutCents,
+        payoutFormatted: centsToBrl(entry.payoutCents),
+        hoursMs: entry.hoursMs,
+        hoursFormatted: formatHours(entry.hoursMs),
+        shiftCount: entry.shiftCount,
+        ...computeMph(entry.grossCents, entry.hoursMs)
+      }))
+      .sort((a, b) => b.grossCents - a.grossCents);
+
+    const dailyList = (() => {
+      const entries = Array.from(daily.values()).sort((a, b) => a.date.localeCompare(b.date));
+      if (entries.length === 0) return [];
+      const filled: { date: string; grossCents: number; payoutCents: number; hoursMs: number; shiftCount: number }[] = [];
+      const byDate = new Map(entries.map((entry) => [entry.date, entry]));
+      for (const key of businessDateKeysInclusive(entries[0].date, entries[entries.length - 1].date)) {
+        filled.push(byDate.get(key) ?? { date: key, grossCents: 0, payoutCents: 0, hoursMs: 0, shiftCount: 0 });
+      }
+      return filled;
+    })();
+
+    return { summary, byModel: byModelList, byChatter: byChatterList, daily: dailyList };
   });
 };
 

@@ -3,12 +3,13 @@ import jwt from "jsonwebtoken";
 import type { FastifyInstance } from "fastify";
 import { env } from "../../config/env";
 
-const refreshExpiresInSeconds = env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60;
+export const refreshExpiresInSeconds = env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60;
 
 export type AccessTokenPayload = {
   sub: string;
   username: string;
   role: "CHATTER" | "MANAGER";
+  authVersion: number;
 };
 
 type RefreshTokenPayload = {
@@ -54,11 +55,16 @@ export const refreshTokenExpirationDate = (): Date => {
   return new Date(Date.now() + refreshExpiresInSeconds * 1000);
 };
 
-export const refreshCookieOptions = {
+export const refreshCookieScope = {
   path: "/",
   httpOnly: true,
   sameSite: "lax" as const,
-  secure: env.COOKIE_SECURE
+  secure: env.NODE_ENV === "production" || env.COOKIE_SECURE
+};
+
+export const refreshCookieOptions = {
+  ...refreshCookieScope,
+  maxAge: refreshExpiresInSeconds
 };
 
 export const tokenHash = hashToken;

@@ -4,6 +4,13 @@ node_modules
 !.env.example
 dist
 coverage
+playwright-report
+test-results
+feedback.json
+grammar_usage.json
+heatmap.json
+projects/
+apps/api/prisma/_cleanup.ts
 npm-debug.log*
 .DS_Store
 *.traineddata

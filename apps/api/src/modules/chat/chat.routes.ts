@@ -13,7 +13,7 @@ const roomMessagesQuerySchema = z.object({
 });
 
 const sendMessageSchema = z.object({
-  content: z.string().min(1).max(2000)
+  content: z.string().trim().min(1).max(2000)
 });
 
 const chatRoutes: FastifyPluginAsync = async (fastify) => {
@@ -85,7 +85,7 @@ const chatRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  fastify.post("/rooms/:modelTagId/messages", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+  fastify.post("/rooms/:modelTagId/messages", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } }, preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
     const params = roomParamsSchema.parse(request.params);
     const body = sendMessageSchema.parse(request.body);

@@ -19,7 +19,8 @@ export const getAllowedModelTagIds = async (
 
   const links = await app.prisma.chatterModelTag.findMany({
     where: {
-      chatterId: userId
+      chatterId: userId,
+      modelTag: { isActive: true }
     },
     select: {
       modelTagId: true
@@ -36,13 +37,14 @@ export const ensureRoomAccess = async (
   modelTagId: string
 ): Promise<boolean> => {
   if (role === Role.MANAGER) {
-    return true;
+    return Boolean(await app.prisma.modelTag.findFirst({ where: { id: modelTagId, isActive: true }, select: { id: true } }));
   }
 
   const link = await app.prisma.chatterModelTag.findFirst({
     where: {
       chatterId: userId,
-      modelTagId
+      modelTagId,
+      modelTag: { isActive: true }
     },
     select: {
       id: true

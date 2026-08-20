@@ -6,120 +6,26 @@ const prisma = new PrismaClient();
 const hash = (value: string) => bcrypt.hash(value, 12);
 
 async function main() {
-  const managerPassword = await hash("Manager@123");
-  const chatterPassword = await hash("Chatter@123");
+  const ensureManager = async (username: string, displayName: string, initialPassword: string) => {
+    const existing = await prisma.user.findUnique({ where: { username } });
+    if (existing) return prisma.user.update({
+      where: { id: existing.id },
+      data: { displayName, role: Role.MANAGER, isActive: true }
+    });
+    return prisma.user.create({ data: {
+      username, displayName, role: Role.MANAGER, isActive: true,
+      passwordHash: await hash(initialPassword), mustChangePassword: false
+    } });
+  };
 
-  const manager = await prisma.user.upsert({
-    where: { username: "gerente.julia" },
-    update: {
-      displayName: "Julia Tesouraria",
-      role: Role.MANAGER,
-      isActive: true,
-      passwordHash: managerPassword
-    },
-    create: {
-      username: "gerente.julia",
-      displayName: "Julia Tesouraria",
-      role: Role.MANAGER,
-      isActive: true,
-      passwordHash: managerPassword
-    }
-  });
+  const julia = await ensureManager("julia", "Julia", "Julia@123");
+  const diego = await ensureManager("diego", "Diego", "Diego@123");
 
-  const chatterUsers = await Promise.all([
-    prisma.user.upsert({
-      where: { username: "chatter.ana" },
-      update: {
-        displayName: "Ana Santos",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      },
-      create: {
-        username: "chatter.ana",
-        displayName: "Ana Santos",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      }
-    }),
-    prisma.user.upsert({
-      where: { username: "chatter.bruno" },
-      update: {
-        displayName: "Bruno Lima",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      },
-      create: {
-        username: "chatter.bruno",
-        displayName: "Bruno Lima",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      }
-    }),
-    prisma.user.upsert({
-      where: { username: "chatter.clara" },
-      update: {
-        displayName: "Clara Rocha",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      },
-      create: {
-        username: "chatter.clara",
-        displayName: "Clara Rocha",
-        role: Role.CHATTER,
-        isActive: true,
-        passwordHash: chatterPassword
-      }
-    })
-  ]);
-
-  const modelTags = await Promise.all([
-    prisma.modelTag.upsert({
-      where: { name: "Modelo A" },
-      update: { isActive: true },
-      create: { name: "Modelo A", isActive: true }
-    }),
-    prisma.modelTag.upsert({
-      where: { name: "Modelo B" },
-      update: { isActive: true },
-      create: { name: "Modelo B", isActive: true }
-    })
-  ]);
-
-  await prisma.chatterModelTag.deleteMany({
-    where: {
-      chatterId: { in: chatterUsers.map((user) => user.id) }
-    }
-  });
-
-  await prisma.chatterModelTag.createMany({
-    data: [
-      {
-        chatterId: chatterUsers[0].id,
-        modelTagId: modelTags[0].id
-      },
-      {
-        chatterId: chatterUsers[1].id,
-        modelTagId: modelTags[0].id
-      },
-      {
-        chatterId: chatterUsers[1].id,
-        modelTagId: modelTags[1].id
-      },
-      {
-        chatterId: chatterUsers[2].id,
-        modelTagId: modelTags[1].id
-      }
-    ]
-  });
-
-  console.log("Seed concluído com sucesso.");
-  console.log("Manager:", manager.username, "senha: Manager@123");
-  console.log("Chatters: chatter.ana | chatter.bruno | chatter.clara, senha: Chatter@123");
+  console.log("✅ Seed concluído com sucesso!");
+  console.log("\n📋 Usuários garantidos (senhas só são definidas na primeira criação):");
+  console.log("Manager inicial: julia | Senha inicial: Julia@123");
+  console.log("Manager inicial: diego | Senha inicial: Diego@123");
+  console.log(`IDs: julia=${julia.id} diego=${diego.id}`);
 }
 
 main()

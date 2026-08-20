@@ -5,25 +5,32 @@
   "type": "commonjs",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:e2e": "tsx scripts/start-e2e.ts",
     "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.901.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.1.0",
+    "@fastify/helmet": "^13.1.0",
     "@fastify/jwt": "^10.0.0",
     "@fastify/multipart": "^10.1.0",
-    "@fastify/sensible": "^6.0.4",
-    "@prisma/client": "^6.13.0",
+    "@fastify/rate-limit": "^11.2.0",
+    "@prisma/client": "6.12.0",
     "bcrypt": "^6.0.0",
     "dayjs": "^1.11.13",
     "dotenv": "^16.6.1",
+    "exceljs": "^4.4.0",
     "fastify": "^5.4.0",
     "fastify-plugin": "^5.0.1",
     "jsonwebtoken": "^9.0.2",
+    "sharp": "0.35.3",
     "socket.io": "^4.8.3",
     "tesseract.js": "^7.0.0",
     "zod": "^4.1.5"
@@ -32,8 +39,9 @@
     "@types/bcrypt": "^6.0.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.3.0",
-    "prisma": "^6.13.0",
+    "prisma": "6.12.0",
     "tsx": "^4.20.4",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "4.1.11"
   }
 }

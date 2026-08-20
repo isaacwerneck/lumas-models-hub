@@ -1,6 +1,7 @@
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import type { Role } from "../types";
+import { SessionStatusScreen } from "./SessionStatusScreen";
 
 export const ProtectedRoute = ({
   children,
@@ -9,18 +10,23 @@ export const ProtectedRoute = ({
   children: React.ReactNode;
   roles?: Role[];
 }) => {
-  const { user, ready } = useAuth();
+  const { user, status } = useAuth();
+  const location = useLocation();
 
-  if (!ready) {
-    return <div className="screen-center">Carregando...</div>;
+  if (status === "restoring" || status === "unavailable") {
+    return <SessionStatusScreen />;
   }
 
-  if (!user) {
+  if (status === "anonymous" || !user) {
     return <Navigate to="/login" replace />;
   }
 
   if (roles && !roles.includes(user.role)) {
     return <Navigate to="/home" replace />;
+  }
+
+  if (user.mustChangePassword && location.pathname !== "/config") {
+    return <Navigate to="/config" replace state={{ passwordChangeRequired: true }} />;
   }
 
   return <>{children}</>;

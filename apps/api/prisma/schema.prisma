@@ -17,17 +17,52 @@ enum ShiftStatus {
   CLOSED
 }
 
-enum PaymentStatus {
+enum EarningsStatus {
   PENDING
-  CHATTER_CONFIRMED
   PAID
-  FORCED_PAID
 }
 
 enum AuditAction {
-  PAYMENT_CONFIRMED
-  PAYMENT_FORCED
+  LOGIN
+  LOGIN_FAILED
+  ACCOUNT_LOCKED
+  LOGOUT
+  PASSWORD_CHANGED
+  USER_CREATED
+  USER_UPDATED
+  TAG_CREATED
+  TAG_UPDATED
+  TAG_DELETED
   CHATTER_MODEL_TAGS_UPDATED
+  SHIFT_STARTED
+  SHIFT_CLOSED
+  SHIFT_UPDATED
+  SHIFT_NOTES_UPDATED
+  PAYMENT_MADE
+  SHIFT_DELETED
+  EVIDENCE_UPLOADED
+  EVIDENCE_PURGED
+  PASSWORD_RESET
+  SESSIONS_REVOKED
+}
+
+enum NotificationType {
+  OCR_LOW_CONFIDENCE
+  NEGATIVE_SHIFT
+}
+
+enum EvidenceStatus {
+  AVAILABLE
+  PURGE_PENDING
+  PURGED
+  MISSING_LEGACY
+}
+
+enum StorageDeletionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }
 
 model User {
@@ -37,6 +72,10 @@ model User {
   passwordHash        String
   role                Role
   isActive            Boolean           @default(true)
+  failedLoginAttempts Int               @default(0)
+  lockedUntil         DateTime?
+  authVersion         Int               @default(0)
+  mustChangePassword  Boolean           @default(false)
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -44,10 +83,12 @@ model User {
   shifts              Shift[]           @relation("ChatterShifts")
   sentMessages        ChatMessage[]     @relation("MessageSender")
   refreshSessions     RefreshSession[]
-  payouts             WeeklyPayout[]    @relation("PayoutOwner")
-  paidPayouts         WeeklyPayout[]    @relation("PayoutPaidBy")
-  forcedPaidPayouts   WeeklyPayout[]    @relation("PayoutForcedBy")
+  earnings            Earnings[]        @relation("ChatterEarnings")
+  paymentHistory      PaymentHistory[]  @relation("ChatterPayments")
+  paidPayments        PaymentHistory[]  @relation("ManagerPayments")
   auditEntries        AuditLog[]        @relation("AuditActor")
+  notifications       Notification[]
+  uploadedEvidence    Evidence[]
 
   @@index([role])
 }
@@ -85,58 +126,81 @@ model Shift {
   startedAt            DateTime
   endedAt              DateTime?
 
-  startImageUrl        String
+  startImageUrl        String?
+  startEvidenceId      String?     @unique
   startOcrRawText      String?
   startOcrConfidence   Decimal?    @db.Decimal(5, 4)
   startValueCents      Int
+  startOriginalCurrency String     @default("BRL")
+  startOriginalAmountCents Int?
+  startFxRate          Decimal?    @db.Decimal(18, 8)
+  startFxProvider      String?
+  startFxQuotedAt      DateTime?
   startValueConfirmedAt DateTime?
 
   endImageUrl          String?
+  endEvidenceId        String?     @unique
   endOcrRawText        String?
   endOcrConfidence     Decimal?    @db.Decimal(5, 4)
   endValueCents        Int?
+  endOriginalCurrency String?
+  endOriginalAmountCents Int?
+  endFxRate            Decimal?    @db.Decimal(18, 8)
+  endFxProvider        String?
+  endFxQuotedAt        DateTime?
   endValueConfirmedAt  DateTime?
 
   grossAmountCents     Int?
   commissionDivisor    Int?
   payoutAmountCents    Int?
   negativeJustification String?
+  notes                String?
 
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
 
   chatter              User        @relation("ChatterShifts", fields: [chatterId], references: [id], onDelete: Restrict)
   modelTag             ModelTag    @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
+  earnings             Earnings?
+  startEvidence        Evidence?   @relation("StartEvidence", fields: [startEvidenceId], references: [id], onDelete: SetNull)
+  endEvidence          Evidence?   @relation("EndEvidence", fields: [endEvidenceId], references: [id], onDelete: SetNull)
 
   @@index([chatterId, startedAt])
   @@index([modelTagId, status])
 }
 
-model WeeklyPayout {
-  id                   String        @id @default(cuid())
-  chatterId            String
-  weekStartDate        DateTime
-  weekEndDate          DateTime
-  status               PaymentStatus @default(PENDING)
+model Earnings {
+  id          String         @id @default(cuid())
+  chatterId   String
+  shiftId     String         @unique
+  amountCents Int
+  status      EarningsStatus @default(PENDING)
+  paidAt      DateTime?
+  paymentId   String?
+  createdAt   DateTime       @default(now())
 
-  weekGrossCents       Int           @default(0)
-  weekPayoutCents      Int           @default(0)
-  lifetimePaidCents    Int           @default(0)
+  chatter     User           @relation("ChatterEarnings", fields: [chatterId], references: [id], onDelete: Restrict)
+  shift       Shift          @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  payment     PaymentHistory? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
-  chatterConfirmedAt   DateTime?
-  paidAt               DateTime?
-  paidById             String?
-  forcedById           String?
+  @@index([chatterId, status])
+  @@index([status])
+  @@index([paymentId])
+}
 
-  createdAt            DateTime      @default(now())
-  updatedAt            DateTime      @updatedAt
+model PaymentHistory {
+  id         String   @id @default(cuid())
+  chatterId  String
+  managerId  String
+  totalCents Int
+  paidAt     DateTime @default(now())
+  requestKey String?  @unique
 
-  chatter              User          @relation("PayoutOwner", fields: [chatterId], references: [id], onDelete: Restrict)
-  paidBy               User?         @relation("PayoutPaidBy", fields: [paidById], references: [id], onDelete: SetNull)
-  forcedBy             User?         @relation("PayoutForcedBy", fields: [forcedById], references: [id], onDelete: SetNull)
+  chatter    User     @relation("ChatterPayments", fields: [chatterId], references: [id], onDelete: Restrict)
+  manager    User     @relation("ManagerPayments", fields: [managerId], references: [id], onDelete: Restrict)
+  earnings   Earnings[]
 
-  @@unique([chatterId, weekStartDate])
-  @@index([status, weekStartDate])
+  @@index([chatterId, paidAt])
 }
 
 model ChatMessage {
@@ -168,15 +232,71 @@ model RefreshSession {
 
 model AuditLog {
   id               String      @id @default(cuid())
-  actorId          String
+  actorId          String?
   action           AuditAction
   targetType       String
   targetId         String?
   metadata         Json?
   createdAt        DateTime    @default(now())
 
-  actor            User        @relation("AuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+  actor            User?       @relation("AuditActor", fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([action, createdAt])
   @@index([targetType, targetId])
+}
+
+model Evidence {
+  id             String         @id @default(cuid())
+  uploadedById   String
+  storageKey     String?        @unique
+  originalName   String
+  mimeType       String
+  sizeBytes      Int
+  sha256         String?
+  status         EvidenceStatus @default(AVAILABLE)
+  createdAt      DateTime       @default(now())
+  attachedAt     DateTime?
+  purgedAt       DateTime?
+
+  uploadedBy     User           @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  startShift     Shift?         @relation("StartEvidence")
+  endShift       Shift?         @relation("EndEvidence")
+  deletionJob    StorageDeletionJob?
+
+  @@index([uploadedById, createdAt])
+  @@index([status, createdAt])
+}
+
+model StorageDeletionJob {
+  id            String                @id @default(cuid())
+  evidenceId    String                @unique
+  storageKey    String
+  status        StorageDeletionStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  lastError     String?
+  nextAttemptAt DateTime              @default(now())
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  evidence      Evidence              @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+}
+
+model Notification {
+  id               String           @id @default(cuid())
+  userId           String
+  type             NotificationType
+  title            String
+  message          String
+  sourceType       String
+  sourceId         String
+  metadata         Json?
+  readAt           DateTime?
+  createdAt        DateTime         @default(now())
+
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type, sourceId])
+  @@index([userId, readAt, createdAt])
 }
