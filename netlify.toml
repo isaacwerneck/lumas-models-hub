@@ -1,0 +1,8 @@
+[build]
+  command = "npm run build:netlify"
+  publish = "apps/web/dist"
+
+[build.environment]
+  NODE_VERSION = "24"
+  NPM_VERSION = "11"
+

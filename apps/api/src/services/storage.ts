@@ -4,6 +4,7 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   PutObjectCommand,
   S3Client
 } from "@aws-sdk/client-s3";
@@ -69,7 +70,9 @@ class S3EvidenceStorage implements EvidenceStorage {
     });
   }
 
-  async ready() { return; }
+  async ready() {
+    await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+  }
   async put(key: string, buffer: Buffer, mimeType: string) {
     await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: buffer, ContentType: mimeType }));
   }

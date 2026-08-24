@@ -4,9 +4,15 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(({ mode }) => {
   const config = loadEnv(mode, process.cwd(), "");
   const isDevelopment = mode === "development";
-  const apiUrl = config.VITE_API_URL || "http://localhost:3333";
-  const apiOrigin = new URL(apiUrl).origin;
-  const socketOrigin = apiOrigin.replace(/^http/, "ws");
+  const apiUrl = config.VITE_API_URL || (isDevelopment ? "http://localhost:3333" : "");
+  const socketUrl = config.VITE_SOCKET_URL || apiUrl;
+  const connectSources = new Set(["'self'"]);
+  for (const candidate of [apiUrl, socketUrl]) {
+    if (!candidate) continue;
+    const origin = new URL(candidate).origin;
+    connectSources.add(origin);
+    connectSources.add(origin.replace(/^http/, "ws"));
+  }
   const csp = [
     "default-src 'self'",
     "base-uri 'self'",
@@ -17,7 +23,7 @@ export default defineConfig(({ mode }) => {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    `connect-src 'self' ${apiOrigin} ${socketOrigin}`
+    `connect-src ${[...connectSources].join(" ")}`
   ].join("; ");
   const headers = {
     "Content-Security-Policy": `${csp}; frame-ancestors 'none'`,

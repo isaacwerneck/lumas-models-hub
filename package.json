@@ -3,8 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "engines": {
-    "node": ">=24",
-    "npm": ">=11"
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
   },
   "workspaces": [
     "apps/*",
@@ -15,6 +15,7 @@
     "dev:web": "npm run dev --workspace web",
     "build:api": "npm run build --workspace @lumas/api",
     "build:web": "npm run build --workspace web",
+    "build:netlify": "npm run build:web && node scripts/prepare-netlify.mjs",
     "build": "npm run build:api && npm run build:web",
     "lint": "npm run lint --workspace web",
     "coverage": "npm run coverage:api && npm run coverage:web",

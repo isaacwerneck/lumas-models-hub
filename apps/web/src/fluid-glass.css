@@ -181,6 +181,18 @@
 .icon-button:active:not(:disabled),
 .notification-button:active:not(:disabled) { transform: translateY(0) scale(.98); }
 
+.notification-icon {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  opacity: .96;
+  filter: brightness(0) invert(1);
+  pointer-events: none;
+}
+
+[data-theme="light"] .notification-icon { filter: none; }
+
 .notification-center { position: relative; z-index: 80; }
 .notification-panel { top: calc(100% + 8px); right: 0; width: min(24rem, calc(100vw - 2rem)); background: var(--glass-fill-solid); }
 

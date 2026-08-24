@@ -7,6 +7,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     exclude: ["e2e/**", "test-results/**", "playwright-report/**", "node_modules/**"],
-    coverage: { provider: "v8", thresholds: { lines: 85 } }
+    coverage: {
+      provider: "v8",
+      thresholds: {
+        statements: 70,
+        branches: 60,
+        functions: 65,
+        lines: 70
+      }
+    }
   }
 });

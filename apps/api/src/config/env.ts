@@ -21,6 +21,7 @@ const envSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().default("15m"),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   REFRESH_COOKIE_NAME: z.string().default("lumas_refresh_token"),
+  COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
   COOKIE_SECURE: booleanFromEnv.default(false),
   TRUST_PROXY: booleanFromEnv.default(false),
   LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
@@ -36,6 +37,22 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().optional(),
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   STORAGE_DELETE_INTERVAL_MS: z.coerce.number().int().min(10_000).default(60_000)
+}).superRefine((value, context) => {
+  if (value.COOKIE_SAME_SITE === "none" && value.NODE_ENV !== "production" && !value.COOKIE_SECURE) {
+    context.addIssue({
+      code: "custom",
+      path: ["COOKIE_SAME_SITE"],
+      message: "SameSite=None exige cookie Secure."
+    });
+  }
+
+  if (value.STORAGE_DRIVER === "s3") {
+    for (const key of ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const) {
+      if (!value[key]) {
+        context.addIssue({ code: "custom", path: [key], message: `${key} é obrigatório com STORAGE_DRIVER=s3.` });
+      }
+    }
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

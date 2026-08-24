@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { AuditAction } from "@prisma/client";
 import { hashPassword, verifyPassword } from "../../utils/password";
 import {
@@ -33,6 +33,13 @@ const changePasswordSchema = z.object({
 });
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
+  const requireTrustedBrowserOrigin = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (env.NODE_ENV !== "production") return;
+    if (request.headers.origin !== env.APP_ORIGIN) {
+      return reply.code(403).send({ message: "Origem da requisição não autorizada." });
+    }
+  };
+
   fastify.post(
     "/login",
     {
@@ -41,7 +48,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           max: env.LOGIN_RATE_LIMIT_MAX,
           timeWindow: "1 minute"
         }
-      }
+      },
+      preHandler: [requireTrustedBrowserOrigin]
     },
     async (request, reply) => {
       const parsedBody = loginSchema.parse(request.body);
@@ -192,7 +200,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  fastify.post("/refresh", async (request, reply) => {
+  fastify.post("/refresh", { preHandler: [requireTrustedBrowserOrigin] }, async (request, reply) => {
     const refreshToken = request.cookies[env.REFRESH_COOKIE_NAME];
 
     if (!refreshToken) {
@@ -267,7 +275,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  fastify.post("/logout", async (request, reply) => {
+  fastify.post("/logout", { preHandler: [requireTrustedBrowserOrigin] }, async (request, reply) => {
     const refreshToken = request.cookies[env.REFRESH_COOKIE_NAME];
 
     if (refreshToken) {

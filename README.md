@@ -62,20 +62,20 @@ npm run dev:api   # inicia API em http://localhost:3333
 npm run dev:web   # inicia frontend em http://localhost:5173
 ```
 
-6. Teste rápido de login (exemplo curl):
+6. Teste rápido de login (exemplo curl, somente desenvolvimento):
 
 ```bash
 curl -i -X POST http://localhost:3333/api/v1/auth/login \
 	-H "Content-Type: application/json" \
-	-d '{"username":"gerente.julia","password":"Manager@123"}'
+	-d '{"username":"julia","password":"Julia@123"}'
 ```
 
-Credenciais iniciais garantidas pelo seed idempotente (a senha só é definida na primeira criação):
+Credenciais locais/de teste garantidas pelo seed idempotente:
 
 - Gerente: `julia` / `Julia@123`
 - Gerente: `diego` / `Diego@123`
 
-O seed não apaga dados existentes e não cria chatters fictícios em produção.
+Em produção, o seed exige `BOOTSTRAP_MANAGER_USERNAME`, `BOOTSTRAP_MANAGER_DISPLAY_NAME` e `BOOTSTRAP_MANAGER_PASSWORD`, nunca altera usuários existentes e obriga a troca da senha inicial.
 
 ## Variaveis de ambiente
 
@@ -94,6 +94,9 @@ Copie `apps/api/.env.example` para `apps/api/.env` e ajuste:
 Copie `apps/web/.env.example` para `apps/web/.env`:
 
 - `VITE_API_URL` (por padrao `http://localhost:3333`)
+- `VITE_SOCKET_URL` (por padrão usa a mesma origem da API)
+
+O passo a passo do piloto Netlify + Render + Neon + R2 está em [docs/deployment-pilot.md](docs/deployment-pilot.md).
 
 ## Banco de dados com Docker
 
@@ -179,10 +182,12 @@ npm run test:e2e
 
 O E2E usa Chromium em `1440×900`, `1024×768`, `390×844` e `360×800`, percorre todas as rotas de gerente e chatter e verifica console, teclado, acessibilidade com axe e overflow horizontal. A regressão visual possui baselines locais de login, dashboard e equipe separados por viewport. O workflow em `.github/workflows/ci.yml` executa migrations em PostgreSQL 17, coverage, lint, builds e E2E com Node.js 24.
 
+Os limites de cobertura do frontend estão fixados próximos da linha de base atual (70% linhas/statements, 65% funções e 60% branches) para que o CI detecte regressões reais. Eles devem subir gradualmente junto com testes dos fluxos ainda menos cobertos; não reduza os limites para acomodar código novo.
+
 ## Segurança de produção
 
 - Use `NODE_ENV=production`, `COOKIE_SECURE=true`, HTTPS e segredos JWT fortes.
-- Configure `APP_ORIGIN` e `VITE_API_URL` com origens exatas.
+- Configure `APP_ORIGIN`, `VITE_API_URL` e `VITE_SOCKET_URL` com origens exatas.
 - Atrás de um proxy confiável, configure `TRUST_PROXY=true`; mantenha `false` quando o processo recebe o tráfego diretamente.
 - `LOGIN_RATE_LIMIT_MAX=5` é o padrão de produção; apenas o servidor isolado do Playwright eleva esse limite para evitar que a própria suíte seja bloqueada.
 - Para a implantação recomendada no mesmo domínio, encaminhe `/api` para o backend e deixe `VITE_API_URL` vazio no build do frontend.

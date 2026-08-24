@@ -26,6 +26,7 @@ jobs:
     env:
       NODE_ENV: test
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lumasmodels_test?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/lumasmodels_test?schema=public
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lumasmodels_test?schema=public
       APP_ORIGIN: http://localhost:5173
       JWT_ACCESS_SECRET: ci-access-secret-with-at-least-32-characters

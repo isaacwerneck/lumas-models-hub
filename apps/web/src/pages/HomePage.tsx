@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import { useAuth } from "../auth/AuthContext";
 import { api, downloadApiFile, getAccessToken } from "../lib/api";
+import { SOCKET_URL } from "../lib/runtime";
 import { Sparkline } from "../components/charts/Sparkline";
 import { AreaChart } from "../components/charts/AreaChart";
 import { BarList } from "../components/charts/BarList";
@@ -170,7 +171,7 @@ export const HomePage = () => {
 
     const token = getAccessToken();
     const socket = token
-      ? io(import.meta.env.VITE_API_URL ?? "http://localhost:3333", {
+      ? io(SOCKET_URL, {
           auth: { token },
           reconnection: true
         })

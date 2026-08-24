@@ -10,6 +10,7 @@ dotenv.config({ path: path.join(apiRoot, ".env") });
 const main = async () => {
   const sourceUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
   if (!sourceUrl) throw new Error("Defina TEST_DATABASE_URL ou DATABASE_URL para executar o E2E.");
+  process.env.DIRECT_URL ??= sourceUrl;
 
   const e2eUrl = new URL(sourceUrl);
   const sourceDatabase = e2eUrl.pathname.replace(/^\//, "");
@@ -27,6 +28,7 @@ const main = async () => {
   e2eUrl.pathname = `/${e2eDatabase}`;
   e2eUrl.searchParams.set("schema", "public");
   process.env.DATABASE_URL = e2eUrl.toString();
+  process.env.DIRECT_URL = e2eUrl.toString();
   process.env.NODE_ENV = "test";
   process.env.COOKIE_SECURE = "false";
   process.env.STORAGE_DRIVER = "local";

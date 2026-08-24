@@ -58,7 +58,7 @@ export const refreshTokenExpirationDate = (): Date => {
 export const refreshCookieScope = {
   path: "/",
   httpOnly: true,
-  sameSite: "lax" as const,
+  sameSite: env.COOKIE_SAME_SITE,
   secure: env.NODE_ENV === "production" || env.COOKIE_SECURE
 };
 

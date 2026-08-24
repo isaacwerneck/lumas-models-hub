@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { io, Socket } from "socket.io-client";
 import { api, getAccessToken } from "../lib/api";
+import { SOCKET_URL } from "../lib/runtime";
 import { formatTime } from "../lib/dateTime";
 import { getApiErrorMessage } from "../lib/apiError";
 import type { ChatRoom } from "../types";
@@ -41,7 +42,7 @@ export const ChatPage = () => {
       return;
     }
 
-    const socketInstance = io(import.meta.env.VITE_API_URL ?? "http://localhost:3333", {
+    const socketInstance = io(SOCKET_URL, {
       auth: { token },
       reconnection: true,
       reconnectionAttempts: Infinity,

@@ -1,37 +1,74 @@
 import { PrismaClient, Role } from "@prisma/client";
 import bcrypt from "bcrypt";
+import dotenv from "dotenv";
+import { z } from "zod";
+
+dotenv.config();
 
 const prisma = new PrismaClient();
-
 const hash = (value: string) => bcrypt.hash(value, 12);
 
+const bootstrapSchema = z.object({
+  BOOTSTRAP_MANAGER_USERNAME: z.string().trim().min(3).max(64).transform((value) => value.toLowerCase()),
+  BOOTSTRAP_MANAGER_DISPLAY_NAME: z.string().trim().min(2).max(120),
+  BOOTSTRAP_MANAGER_PASSWORD: z.string().min(12).max(128)
+});
+
+type ManagerSeed = { username: string; displayName: string; password: string };
+
+const managersForEnvironment = (): ManagerSeed[] => {
+  if (process.env.NODE_ENV !== "production") {
+    return [
+      { username: "julia", displayName: "Julia", password: "Julia@123" },
+      { username: "diego", displayName: "Diego", password: "Diego@123" }
+    ];
+  }
+
+  const parsed = bootstrapSchema.safeParse(process.env);
+  if (!parsed.success) {
+    throw new Error(`Credenciais de bootstrap inválidas: ${parsed.error.message}`);
+  }
+
+  return [{
+    username: parsed.data.BOOTSTRAP_MANAGER_USERNAME,
+    displayName: parsed.data.BOOTSTRAP_MANAGER_DISPLAY_NAME,
+    password: parsed.data.BOOTSTRAP_MANAGER_PASSWORD
+  }];
+};
+
 async function main() {
-  const ensureManager = async (username: string, displayName: string, initialPassword: string) => {
+  const ensureManager = async ({ username, displayName, password }: ManagerSeed) => {
     const existing = await prisma.user.findUnique({ where: { username } });
-    if (existing) return prisma.user.update({
-      where: { id: existing.id },
-      data: { displayName, role: Role.MANAGER, isActive: true }
+    if (existing) {
+      console.log(`Manager existente preservado: ${username} (${existing.id})`);
+      return existing;
+    }
+
+    const created = await prisma.user.create({
+      data: {
+        username,
+        displayName,
+        role: Role.MANAGER,
+        isActive: true,
+        passwordHash: await hash(password),
+        mustChangePassword: true
+      }
     });
-    return prisma.user.create({ data: {
-      username, displayName, role: Role.MANAGER, isActive: true,
-      passwordHash: await hash(initialPassword), mustChangePassword: false
-    } });
+    console.log(`Manager inicial criado: ${username} (${created.id}); troca de senha obrigatória.`);
+    return created;
   };
 
-  const julia = await ensureManager("julia", "Julia", "Julia@123");
-  const diego = await ensureManager("diego", "Diego", "Diego@123");
+  for (const manager of managersForEnvironment()) {
+    await ensureManager(manager);
+  }
 
-  console.log("✅ Seed concluído com sucesso!");
-  console.log("\n📋 Usuários garantidos (senhas só são definidas na primeira criação):");
-  console.log("Manager inicial: julia | Senha inicial: Julia@123");
-  console.log("Manager inicial: diego | Senha inicial: Diego@123");
-  console.log(`IDs: julia=${julia.id} diego=${diego.id}`);
+  console.log("Seed concluído com sucesso.");
 }
 
 main()
   .catch((error) => {
     console.error(error);
-    process.exit(1);
+    process.exitCode = 1;
   })
   .finally(async () => {
     await prisma.$disconnect();

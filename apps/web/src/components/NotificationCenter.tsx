@@ -104,7 +104,12 @@ export const NotificationCenter = () => {
         aria-controls="notification-panel"
         onClick={() => setOpen((value) => !value)}
       >
-        <span aria-hidden="true">🔔</span>
+        <img
+          className="notification-icon"
+          src="/assets/notification-bell.png"
+          alt=""
+          aria-hidden="true"
+        />
         {unreadCount > 0 ? <span className="notification-count">{unreadCount > 99 ? "99+" : unreadCount}</span> : null}
       </button>
       <AnimatePresence initial={false}>

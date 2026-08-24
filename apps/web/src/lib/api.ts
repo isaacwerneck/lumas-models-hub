@@ -1,7 +1,7 @@
 import axios from "axios";
 import type { AuthUser } from "../types";
+import { API_URL } from "./runtime";
 
-const API_URL = import.meta.env.VITE_API_URL ?? (import.meta.env.PROD ? "" : "http://localhost:3333");
 const API_V1_URL = `${API_URL.replace(/\/$/, "")}/api/v1`;
 const LEGACY_ACCESS_TOKEN_KEY = "lumas_access_token";
 const REFRESH_LOCK_NAME = "lumas-auth-refresh";
