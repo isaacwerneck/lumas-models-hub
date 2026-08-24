@@ -77,7 +77,7 @@ export type MoneyMetadata = {
 };
 
 export const ShiftSchema = z.object({
-  id: z.string(), modelTagId: z.string(), modelTag: ModelTagSchema.pick({ id: true, name: true }),
+  id: z.string(), batchId: z.string().nullable().optional(), modelTagId: z.string(), modelTag: ModelTagSchema.pick({ id: true, name: true }),
   status: z.enum(["OPEN", "CLOSED"]), startedAt: z.string(), endedAt: z.string().nullable(),
   startEvidence: EvidenceSchema.nullable().optional(), endEvidence: EvidenceSchema.nullable().optional(),
   startValueFormatted: z.string(), endValueFormatted: z.string().nullable(), grossAmountFormatted: z.string().nullable(),

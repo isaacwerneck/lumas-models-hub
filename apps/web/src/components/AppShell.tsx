@@ -82,22 +82,20 @@ export const AppShell = () => {
         <div className="bg-particle p2" />
         <div className="bg-particle p3" />
         <div className="bg-particle p4" />
-        <div className="bg-flowers" />
       </div>
 
       <DotartSide className="app-ornament left" />
 
-      <div className="shell-account-actions">
-        <NotificationCenter />
-        <div className="user-chip" title={user?.username}>{user?.displayName}</div>
-        <button type="button" className="icon-button" onClick={toggleTheme} aria-label={theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro"} title={theme === "dark" ? "Tema claro" : "Tema escuro"}>
-          {theme === "dark" ? <Sun size={18} /> : <MoonStar size={18} />}
-        </button>
-        <button type="button" className="icon-button" onClick={handleLogout} aria-label="Sair" title="Sair"><LogOut size={18} /></button>
-        <button type="button" className="icon-button shell-mobile-more" onClick={() => setMoreOpen(true)} aria-label="Abrir mais opções"><Menu size={21} /></button>
-      </div>
-
       <main className="app-shell">
+        <div className="shell-account-actions">
+          <NotificationCenter />
+          <div className="user-chip" title={user?.username}>{user?.displayName}</div>
+          <button type="button" className="icon-button" onClick={toggleTheme} aria-label={theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro"} title={theme === "dark" ? "Tema claro" : "Tema escuro"}>
+            {theme === "dark" ? <Sun size={18} /> : <MoonStar size={18} />}
+          </button>
+          <button type="button" className="icon-button" onClick={handleLogout} aria-label="Sair" title="Sair"><LogOut size={18} /></button>
+          <button type="button" className="icon-button shell-mobile-more" onClick={() => setMoreOpen(true)} aria-label="Abrir mais opções"><Menu size={21} /></button>
+        </div>
         <header className="hub-nav-wrap">
           <nav className="hub-nav" aria-label="Navegação principal">
             <div className="hub-nav-group">

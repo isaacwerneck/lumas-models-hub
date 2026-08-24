@@ -162,13 +162,13 @@ export const ManagerChattersPage = () => {
         ) : (
           <div className="chatter-table">
             <span className="cell head">Usuario</span>
-            <span className="cell head">Total produzido</span>
+            <span className="cell head">Total líquido</span>
             <span className="cell head right">Status</span>
             <span className="cell head center">Acoes</span>
             {chatters.map((chatter) => (
               <Fragment key={chatter.id}>
                 <span className="cell name">{chatter.displayName}</span>
-                <span className="cell">{chatter.totalGrossFormatted}</span>
+                <span className="cell">{chatter.totalPayoutFormatted}</span>
                 <span className="cell right">
                   <span className={chatter.isActive ? "status-badge paid" : "status-badge"}>
                     {chatter.isActive ? "Ativo" : "Inativo"}

@@ -14,6 +14,7 @@ import shiftRemindersPlugin from "./plugins/shift-reminders";
 import storagePlugin from "./plugins/storage";
 import authRoutes from "./modules/auth/auth.routes";
 import chatterRoutes from "./modules/chatter/chatter.routes";
+import chatterBatchRoutes from "./modules/chatter/chatter-batch.routes";
 import managerRoutes from "./modules/manager/manager.routes";
 import chatRoutes from "./modules/chat/chat.routes";
 import ocrRoutes from "./modules/ocr/ocr.routes";
@@ -42,6 +43,7 @@ const registerRouteSet = async (app: FastifyInstance) => {
 
   app.register(authRoutes, { prefix: "/auth" });
   app.register(chatterRoutes, { prefix: "/chatter" });
+  app.register(chatterBatchRoutes, { prefix: "/chatter" });
   app.register(managerRoutes, { prefix: "/manager" });
   app.register(chatRoutes, { prefix: "/chat" });
   app.register(ocrRoutes, { prefix: "/ocr" });

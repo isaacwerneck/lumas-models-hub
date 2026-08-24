@@ -456,6 +456,105 @@ describe("turnos", () => {
     expect(r.statusCode).toBe(200);
     expect(json(r).shift.notes).toBe("Conferido pelo gerente");
   });
+  it("abre e encerra um lote simultâneo em duas modelos diferentes", async () => {
+    await app.prisma.chatterModelTag.upsert({
+      where: { chatterId_modelTagId: { chatterId, modelTagId: otherTagId } },
+      create: { chatterId, modelTagId: otherTagId }, update: {}
+    });
+    const startEvidence = await Promise.all([
+      createTestEvidence(chatterId, "lote-modelo-a-inicio.webp"),
+      createTestEvidence(chatterId, "lote-modelo-b-inicio.webp")
+    ]);
+    const startedAt = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+    const opened = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start-batch", headers: auth(chatterToken), payload: {
+      startedAt, notificationsEnabled: true,
+      shifts: [
+        { modelTagId: tagId, evidenceId: startEvidence[0].id, manualConfirmedValue: "R$ 100,00" },
+        { modelTagId: otherTagId, evidenceId: startEvidence[1].id, manualConfirmedValue: "R$ 200,00" }
+      ]
+    } });
+    expect(opened.statusCode).toBe(201);
+    expect(json(opened).shifts).toHaveLength(2);
+    const current = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) });
+    expect(json(current).shifts).toHaveLength(2);
+
+    const endEvidence = await Promise.all([
+      createTestEvidence(chatterId, "lote-modelo-a-fim.webp"),
+      createTestEvidence(chatterId, "lote-modelo-b-fim.webp")
+    ]);
+    const ended = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/end-batch", headers: auth(chatterToken), payload: {
+      endedAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+      shifts: json(opened).shifts.map((shift: { id: string; modelTagId: string }, index: number) => ({
+        shiftId: shift.id, evidenceId: endEvidence[index].id,
+        manualConfirmedValue: shift.modelTagId === tagId ? "R$ 140,00" : "R$ 250,00"
+      }))
+    } });
+    expect(ended.statusCode).toBe(200);
+    expect(json(ended).shifts).toHaveLength(2);
+  });
+  it("aceita turno anterior sem sobreposição enquanto outro chatter está online na mesma modelo", async () => {
+    await app.prisma.chatterModelTag.upsert({
+      where: { chatterId_modelTagId: { chatterId: otherChatterId, modelTagId: tagId } },
+      create: { chatterId: otherChatterId, modelTagId: tagId }, update: {}
+    });
+    const now = Date.now();
+    const onlineEvidence = await createTestEvidence(otherChatterId, "online-atual.webp");
+    const online = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: {
+      modelTagId: tagId, startedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+      startEvidenceId: onlineEvidence.id, manualConfirmedValue: "R$ 500,00", notificationsEnabled: true
+    } });
+    expect(online.statusCode).toBe(201);
+
+    const retroEvidence = await Promise.all([
+      createTestEvidence(chatterId, "retro-inicio.webp"), createTestEvidence(chatterId, "retro-fim.webp")
+    ]);
+    const retro = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(chatterToken), payload: {
+      startedAt: new Date(now - 26 * 60 * 60_000).toISOString(),
+      endedAt: new Date(now - 20 * 60 * 60_000).toISOString(),
+      shifts: [{ modelTagId: tagId,
+        start: { evidenceId: retroEvidence[0].id, manualConfirmedValue: "R$ 100,00" },
+        end: { evidenceId: retroEvidence[1].id, manualConfirmedValue: "R$ 160,00" }
+      }]
+    } });
+    expect(retro.statusCode).toBe(201);
+
+    const overlapEvidence = await Promise.all([
+      createTestEvidence(chatterId, "sobreposto-inicio.webp"), createTestEvidence(chatterId, "sobreposto-fim.webp")
+    ]);
+    const overlap = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(chatterToken), payload: {
+      startedAt: new Date(now - 90 * 60_000).toISOString(), endedAt: new Date(now - 30 * 60_000).toISOString(),
+      shifts: [{ modelTagId: tagId,
+        start: { evidenceId: overlapEvidence[0].id, manualConfirmedValue: "R$ 200,00" },
+        end: { evidenceId: overlapEvidence[1].id, manualConfirmedValue: "R$ 210,00" }
+      }]
+    } });
+    expect(overlap.statusCode).toBe(409);
+    await app.prisma.shift.delete({ where: { id: json(online).shift.id } });
+  });
+  it("permite ao gerente apagar turno confirmado não pago e protege turno pago", async () => {
+    const removable = await app.prisma.shift.create({ data: {
+      chatterId, modelTagId: tagId, status: "CLOSED", startedAt: new Date("2026-08-18T10:00:00.000Z"),
+      endedAt: new Date("2026-08-18T11:00:00.000Z"), startValueCents: 0, endValueCents: 5000,
+      grossAmountCents: 5000, payoutPercentage: 20, payoutAmountCents: 1000, chatterVerifiedAt: new Date()
+    } });
+    await app.prisma.earnings.create({ data: { chatterId, shiftId: removable.id, amountCents: 1000 } });
+    const deleted = await app.inject({ method: "DELETE", url: `/api/v1/manager/shifts/${removable.id}`, headers: auth(managerToken) });
+    expect(deleted.statusCode).toBe(200);
+    expect(await app.prisma.shift.findUnique({ where: { id: removable.id } })).toBeNull();
+
+    const paidShift = await app.prisma.shift.create({ data: {
+      chatterId, modelTagId: tagId, status: "CLOSED", startedAt: new Date("2026-08-18T12:00:00.000Z"),
+      endedAt: new Date("2026-08-18T13:00:00.000Z"), startValueCents: 0, endValueCents: 5000,
+      grossAmountCents: 5000, payoutPercentage: 20, payoutAmountCents: 1000
+    } });
+    const payment = await app.prisma.paymentHistory.create({ data: { chatterId, managerId, totalCents: 1000 } });
+    await app.prisma.earnings.create({ data: { chatterId, shiftId: paidShift.id, amountCents: 1000, status: "PAID", paidAt: new Date(), paymentId: payment.id } });
+    const protectedResponse = await app.inject({ method: "DELETE", url: `/api/v1/manager/shifts/${paidShift.id}`, headers: auth(managerToken) });
+    expect(protectedResponse.statusCode).toBe(409);
+    await app.prisma.earnings.delete({ where: { shiftId: paidShift.id } });
+    await app.prisma.paymentHistory.delete({ where: { id: payment.id } });
+    await app.prisma.shift.delete({ where: { id: paidShift.id } });
+  });
   it("inclui lançamento legado sem duração nos totais do ranking", async () => {
     const instant = new Date("2026-08-19T19:27:00.000Z");
     const legacyShift = await app.prisma.shift.create({ data: {

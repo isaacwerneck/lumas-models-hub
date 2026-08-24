@@ -149,6 +149,7 @@ model ChatterModelTag {
 
 model Shift {
   id                   String      @id @default(cuid())
+  batchId              String?
   chatterId            String
   modelTagId           String
   status               ShiftStatus @default(OPEN)
@@ -200,6 +201,8 @@ model Shift {
 
   @@index([chatterId, startedAt])
   @@index([modelTagId, status])
+  @@index([batchId])
+  @@index([modelTagId, startedAt, endedAt])
 }
 
 model Earnings {

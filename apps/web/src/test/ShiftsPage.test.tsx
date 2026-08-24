@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "../components/Toast";
 import { ShiftsPage } from "../pages/ShiftsPage";
 
@@ -36,7 +37,7 @@ describe("ShiftsPage", () => {
   afterEach(() => cleanup());
 
   it("restaura o valor inicial e só mostra a justificativa quando o saldo fica negativo", async () => {
-    render(<ToastProvider><ShiftsPage /></ToastProvider>);
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
 
     expect(await screen.findByRole("heading", { name: /Encerrar turno/ })).toBeInTheDocument();
     const endValue = screen.getByLabelText("Valor do faturamento");
@@ -47,5 +48,40 @@ describe("ShiftsPage", () => {
 
     fireEvent.change(endValue, { target: { value: "150,00" } });
     await waitFor(() => expect(screen.queryByLabelText("Justificativa para saldo negativo")).not.toBeInTheDocument());
+  });
+
+  it("alterna para lançamento anterior e permite adicionar uma segunda modelo", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }, { id: "tag-2", name: "Bella" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [], shift: null } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Abrir ponto" });
+    fireEvent.click(screen.getByRole("button", { name: "Lançar turno anterior" }));
+    expect(screen.getByRole("heading", { name: "Lançar turno anterior" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Adicionar segunda modelo/ }));
+    expect(screen.getAllByLabelText("Modelo")).toHaveLength(2);
+  });
+
+  it("cola imagem no campo ativo sem interceptar a colagem em campos de texto", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [], shift: null } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    apiMocks.post.mockResolvedValue({ data: { evidence: { id: "evidence-1" }, detectedValue: "100,00", confidence: 0.95 } });
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    const dropzone = await screen.findByRole("button", { name: /Print do faturamento \(início\)/ });
+    fireEvent.focus(dropzone);
+    const image = new File(["image"], "captura.png", { type: "image/png" });
+    fireEvent.paste(window, { clipboardData: { files: [image], items: [] } });
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith("/ocr/extract", expect.any(FormData)));
+
+    apiMocks.post.mockClear();
+    const money = screen.getByLabelText("Valor do faturamento");
+    fireEvent.focus(money);
+    fireEvent.paste(money, { clipboardData: { files: [image], items: [] } });
+    expect(apiMocks.post).not.toHaveBeenCalled();
   });
 });

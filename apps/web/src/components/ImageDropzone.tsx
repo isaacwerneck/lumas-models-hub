@@ -5,9 +5,11 @@ type ImageDropzoneProps = {
   fileName: string | null;
   reading: boolean;
   onFile: (file: File) => void;
+  active?: boolean;
+  onActivate?: () => void;
 };
 
-export const ImageDropzone = ({ title, fileName, reading, onFile }: ImageDropzoneProps) => {
+export const ImageDropzone = ({ title, fileName, reading, onFile, active = false, onActivate }: ImageDropzoneProps) => {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const pickFile = () => {
@@ -16,10 +18,14 @@ export const ImageDropzone = ({ title, fileName, reading, onFile }: ImageDropzon
 
   return (
     <div
-      className="dropzone"
+      className={active ? "dropzone is-paste-target" : "dropzone"}
       role="button"
       tabIndex={0}
-      onClick={pickFile}
+      onClick={() => {
+        onActivate?.();
+        pickFile();
+      }}
+      onFocus={onActivate}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -28,6 +34,7 @@ export const ImageDropzone = ({ title, fileName, reading, onFile }: ImageDropzon
       }}
       onDragOver={(event) => {
         event.preventDefault();
+        onActivate?.();
         event.dataTransfer.dropEffect = "copy";
       }}
       onDrop={(event) => {
@@ -36,6 +43,7 @@ export const ImageDropzone = ({ title, fileName, reading, onFile }: ImageDropzon
           candidate.type.toLowerCase().startsWith("image/")
         );
         if (file) {
+          onActivate?.();
           onFile(file);
         }
       }}

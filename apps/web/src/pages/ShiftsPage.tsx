@@ -1,651 +1,285 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import { api } from "../lib/api";
-import { useAuth } from "../auth/AuthContext";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { ImageDropzone } from "../components/ImageDropzone";
+import { ModalDialog } from "../components/ModalDialog";
 import { MoneyField } from "../components/MoneyField";
+import { useToast } from "../components/Toast";
+import { useAuth } from "../auth/AuthContext";
+import { api } from "../lib/api";
+import { getApiErrorMessage } from "../lib/apiError";
 import { formatBrl, parseMoneyInput } from "../lib/money";
 import type { MoneyCurrency } from "../lib/money";
-import type { OcrExtractResponse, FxRateResponse } from "../types/api";
-import { useToast } from "../components/Toast";
-import { getApiErrorMessage } from "../lib/apiError";
-import { ModalDialog } from "../components/ModalDialog";
-import { Link } from "react-router-dom";
+import type { FxRateResponse, OcrExtractResponse } from "../types/api";
 
-type Shift = {
-  id: string;
-  modelTagId: string;
-  startedAt: string;
-  startValueCents: number;
-  startOriginalCurrency?: string | null;
-  startOriginalAmountCents?: number | null;
-  startFxRate?: string | number | null;
-  modelTag: { id: string; name: string };
-};
-
+type Shift = { id: string; batchId?: string | null; modelTagId: string; startedAt: string; startValueCents: number; startOriginalCurrency?: string | null; startOriginalAmountCents?: number | null; modelTag: { id: string; name: string } };
 type Room = { id: string; name: string };
+type ShiftMode = "live" | "retroactive";
+type EvidenceSide = "start" | "end";
+type DraftScope = "live" | "retroactive" | "closing";
+type EvidenceDraft = { evidenceId: string; imageName: string; value: string; currency: MoneyCurrency; confidence: number | null; reading: boolean };
+type ModelDraft = { key: string; modelTagId: string; start: EvidenceDraft; end: EvidenceDraft; negativeJustification: string };
+type ClosingDraft = ModelDraft & { shift: Shift };
 
+const emptyEvidence = (): EvidenceDraft => ({ evidenceId: "", imageName: "", value: "", currency: "BRL", confidence: null, reading: false });
+const emptyModelDraft = (modelTagId = ""): ModelDraft => ({ key: crypto.randomUUID(), modelTagId, start: emptyEvidence(), end: emptyEvidence(), negativeJustification: "" });
 const toDateTimeLocalValue = (date: Date) => {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
-
 const parseDateTimeLocalToIso = (value: string) => {
-  if (!value.trim()) {
-    return null;
-  }
-
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  return parsed.toISOString();
+  return value.trim() && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
 };
-
 const centsToMoneyInput = (cents: number) => (cents / 100).toFixed(2).replace(".", ",");
-
 const extractImageFromClipboard = (clipboardData: DataTransfer | null): File | null => {
-  if (!clipboardData) {
-    return null;
-  }
-
-  if (clipboardData.files?.length) {
-    const file = Array.from(clipboardData.files).find((candidate) =>
-      candidate.type.toLowerCase().startsWith("image/")
-    );
-    if (file) {
-      return file;
-    }
-  }
-
-  if (!clipboardData.items?.length) {
-    return null;
-  }
-
-  const imageItem = Array.from(clipboardData.items).find((item) => item.type.toLowerCase().startsWith("image/"));
-  return imageItem?.getAsFile() ?? null;
+  if (!clipboardData) return null;
+  const file = Array.from(clipboardData.files ?? []).find((candidate) => candidate.type.toLowerCase().startsWith("image/"));
+  if (file) return file;
+  return Array.from(clipboardData.items ?? []).find((item) => item.type.toLowerCase().startsWith("image/"))?.getAsFile() ?? null;
 };
+const isTextEditingTarget = (target: EventTarget | null) => target instanceof HTMLElement
+  && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+const hasNegativeBalance = (draft: ModelDraft) => {
+  if (draft.start.currency !== draft.end.currency) return false;
+  const start = parseMoneyInput(draft.start.value);
+  const end = parseMoneyInput(draft.end.value);
+  return start !== null && end !== null && end < start;
+};
+
+type ValueFieldsProps = { draftKey: string; side: EvidenceSide; label: string; value: EvidenceDraft; pasteTarget: string | null; onActivate: () => void; onFile: (file: File) => void; onChange: (patch: Partial<EvidenceDraft>) => void };
+const ValueFields = ({ draftKey, side, label, value, pasteTarget, onActivate, onFile, onChange }: ValueFieldsProps) => (
+  <div className="shift-value-fields">
+    <ImageDropzone title={`Print do faturamento (${label})`} fileName={value.imageName} reading={value.reading}
+      active={pasteTarget?.endsWith(`${draftKey}:${side}`)} onActivate={onActivate} onFile={onFile} />
+    <MoneyField value={value.value} onValueChange={(next) => onChange({ value: next })} currency={value.currency}
+      onCurrencyChange={(currency) => onChange({ currency })} confidence={value.confidence} reading={value.reading} />
+  </div>
+);
 
 export const ShiftsPage = () => {
   const { user } = useAuth();
   const toast = useToast();
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [currentShift, setCurrentShift] = useState<Shift | null>(null);
+  const [currentShifts, setCurrentShifts] = useState<Shift[]>([]);
+  const [mode, setMode] = useState<ShiftMode>("live");
+  const [liveDrafts, setLiveDrafts] = useState<ModelDraft[]>([emptyModelDraft()]);
+  const [retroDrafts, setRetroDrafts] = useState<ModelDraft[]>([emptyModelDraft()]);
+  const [closingDrafts, setClosingDrafts] = useState<ClosingDraft[]>([]);
+  const [liveStartAt, setLiveStartAt] = useState(() => toDateTimeLocalValue(new Date()));
+  const [retroStartAt, setRetroStartAt] = useState(() => toDateTimeLocalValue(new Date(Date.now() - 2 * 60 * 60_000)));
+  const [retroEndAt, setRetroEndAt] = useState(() => toDateTimeLocalValue(new Date(Date.now() - 60 * 60_000)));
+  const [closeAt, setCloseAt] = useState(() => toDateTimeLocalValue(new Date()));
+  const [pasteTarget, setPasteTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [ending, setEnding] = useState(false);
   const [loading, setLoading] = useState(true);
-
-  const [modelTagId, setModelTagId] = useState("");
-  const [startEvidenceId, setStartEvidenceId] = useState("");
-  const [startImageName, setStartImageName] = useState("");
-  const [startAt, setStartAt] = useState(() => toDateTimeLocalValue(new Date()));
-  const [startValue, setStartValue] = useState("");
-  const [startCurrency, setStartCurrency] = useState<MoneyCurrency>("BRL");
-  const [startConfidence, setStartConfidence] = useState<number | null>(null);
-  const [readingStartImage, setReadingStartImage] = useState(false);
-
-  const [endEvidenceId, setEndEvidenceId] = useState("");
-  const [endImageName, setEndImageName] = useState("");
-  const [endAt, setEndAt] = useState(() => toDateTimeLocalValue(new Date()));
-  const [endValue, setEndValue] = useState("");
-  const [endCurrency, setEndCurrency] = useState<MoneyCurrency>("BRL");
-  const [endConfidence, setEndConfidence] = useState<number | null>(null);
-  const [readingEndImage, setReadingEndImage] = useState(false);
-  const [negativeJustification, setNegativeJustification] = useState("");
-  const [fxRate, setFxRate] = useState<number | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const notificationsEnabled = typeof Notification !== "undefined" && Notification.permission === "granted";
 
   const extractWithOcr = useCallback(async (file: File) => {
     const formData = new FormData();
     formData.append("image", file);
-    const response = await api.post<OcrExtractResponse>("/ocr/extract", formData);
-    return response.data;
+    return (await api.post<OcrExtractResponse>("/ocr/extract", formData)).data;
   }, []);
 
-  const resolveBrlValue = useCallback(async (value: string, currency: MoneyCurrency) => {
-    if (!value.trim()) {
-      throw new Error("Preencha o valor de faturamento.");
-    }
-
-    if (currency === "BRL") {
-      const original = parseMoneyInput(value);
-      return {
-        brlValue: value.trim(),
-        conversionRate: null as number | null,
-        moneyMetadata: {
-          currency: "BRL" as const,
-          originalAmountCents: Math.round((original ?? 0) * 100)
-        }
-      };
-    }
-
-    const usdValue = parseMoneyInput(value);
-    if (usdValue === null) {
-      throw new Error("Valor em USD invalido.");
-    }
-
-    const fxResponse = await api.get<FxRateResponse>("/fx/usd-brl");
-    const rate = Number(fxResponse.data.rate);
-    if (!Number.isFinite(rate) || rate <= 0) {
-      throw new Error("Cotacao USD/BRL invalida no momento.");
-    }
-
-    return {
-      brlValue: formatBrl(usdValue * rate),
-      conversionRate: rate,
-      moneyMetadata: {
-        currency: "USD" as const,
-        originalAmountCents: Math.round(usdValue * 100),
-        fxRate: rate,
-        fxProvider: fxResponse.data.provider ?? "AwesomeAPI",
-        fxQuotedAt: fxResponse.data.quotedAt ?? new Date().toISOString()
-      }
-    };
-  }, []);
-
-  const applyStartImage = useCallback(
-    async (file: File) => {
-      setError(null);
-      setStartImageName(file.name);
-      setStartEvidenceId("");
-      setReadingStartImage(true);
-
-      try {
-        const ocr = await extractWithOcr(file);
-        setStartEvidenceId(ocr.evidence.id);
-        if (ocr.detectedValue) {
-          setStartValue(ocr.detectedValue);
-        } else {
-          const debugText = (ocr.rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 140);
-          setError(
-            `OCR nao encontrou valor de faturamento na imagem inicial. Texto lido: ${debugText || "(vazio)"}`
-          );
-        }
-        setStartConfidence(ocr.confidence);
-      } catch {
-        setError("Nao foi possivel ler a imagem inicial com OCR. Voce ainda pode preencher os campos manualmente.");
-      } finally {
-        setReadingStartImage(false);
-      }
-    },
-    [extractWithOcr]
-  );
-
-  const applyEndImage = useCallback(
-    async (file: File) => {
-      setError(null);
-      setEndImageName(file.name);
-      setEndEvidenceId("");
-      setReadingEndImage(true);
-
-      try {
-        const ocr = await extractWithOcr(file);
-        setEndEvidenceId(ocr.evidence.id);
-        if (ocr.detectedValue) {
-          setEndValue(ocr.detectedValue);
-        } else {
-          const debugText = (ocr.rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 140);
-          setError(`OCR nao encontrou valor de faturamento na imagem final. Texto lido: ${debugText || "(vazio)"}`);
-        }
-        setEndConfidence(ocr.confidence);
-      } catch {
-        setError("Nao foi possivel ler a imagem final com OCR. Voce ainda pode preencher os campos manualmente.");
-      } finally {
-        setReadingEndImage(false);
-      }
-    },
-    [extractWithOcr]
-  );
-
-  const handlePastedImage = useCallback(
-    (file: File) => {
-      if (currentShift) {
-        void applyEndImage(file);
-        return;
-      }
-
-      void applyStartImage(file);
-    },
-    [applyEndImage, applyStartImage, currentShift]
-  );
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
-      const [roomsResponse, shiftResponse] = await Promise.all([
-        api.get("/chat/rooms"),
-        api.get("/chatter/shifts/current")
+      const [roomResponse, shiftResponse] = await Promise.all([
+        api.get<{ rooms: Room[] }>("/chat/rooms"),
+        api.get<{ shifts?: Shift[]; shift?: Shift | null }>("/chatter/shifts/current")
       ]);
-
-      const openShift = shiftResponse.data.shift as Shift | null;
-      setRooms(roomsResponse.data.rooms);
-      setCurrentShift(openShift);
-
-      if (openShift) {
-        const originalCurrency: MoneyCurrency = openShift.startOriginalCurrency === "USD" ? "USD" : "BRL";
-        const originalCents = originalCurrency === "USD"
-          ? openShift.startOriginalAmountCents ?? openShift.startValueCents
-          : openShift.startValueCents;
-        setStartAt(toDateTimeLocalValue(new Date(openShift.startedAt)));
-        setStartCurrency(originalCurrency);
-        setStartValue(centsToMoneyInput(originalCents));
-        const persistedRate = Number(openShift.startFxRate);
-        if (originalCurrency === "USD" && Number.isFinite(persistedRate) && persistedRate > 0) {
-          setFxRate(persistedRate);
-        }
-      }
-
-      if (!modelTagId && roomsResponse.data.rooms.length) {
-        setModelTagId(roomsResponse.data.rooms[0].id);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadData();
+      const nextRooms = roomResponse.data.rooms;
+      const nextShifts = shiftResponse.data.shifts ?? (shiftResponse.data.shift ? [shiftResponse.data.shift] : []);
+      setRooms(nextRooms);
+      setCurrentShifts(nextShifts);
+      const fillModels = (drafts: ModelDraft[]) => drafts.map((draft, index) => ({ ...draft, modelTagId: draft.modelTagId || nextRooms[index]?.id || nextRooms[0]?.id || "" }));
+      setLiveDrafts(fillModels);
+      setRetroDrafts(fillModels);
+      setClosingDrafts(nextShifts.map((shift) => {
+        const currency: MoneyCurrency = shift.startOriginalCurrency === "USD" ? "USD" : "BRL";
+        const cents = currency === "USD" ? shift.startOriginalAmountCents ?? shift.startValueCents : shift.startValueCents;
+        return { ...emptyModelDraft(shift.modelTagId), key: shift.id, shift, start: { ...emptyEvidence(), value: centsToMoneyInput(cents), currency } };
+      }));
+    } catch (requestError: unknown) {
+      setError(getApiErrorMessage(requestError, "Não foi possível carregar seus turnos."));
+    } finally { setLoading(false); }
   }, []);
+
+  useEffect(() => { void loadData(); }, [loadData]);
+
+  const setDraftEvidence = useCallback((scope: DraftScope, key: string, side: EvidenceSide, patch: Partial<EvidenceDraft>) => {
+    const update = <T extends ModelDraft>(items: T[]) => items.map((item) => item.key === key ? { ...item, [side]: { ...item[side], ...patch } } : item);
+    if (scope === "live") setLiveDrafts(update);
+    if (scope === "retroactive") setRetroDrafts(update);
+    if (scope === "closing") setClosingDrafts(update);
+  }, []);
+
+  const applyImage = useCallback(async (scope: DraftScope, key: string, side: EvidenceSide, file: File) => {
+    setError(null);
+    setDraftEvidence(scope, key, side, { imageName: file.name, evidenceId: "", reading: true });
+    try {
+      const ocr = await extractWithOcr(file);
+      setDraftEvidence(scope, key, side, { evidenceId: ocr.evidence.id, value: ocr.detectedValue ?? "", confidence: ocr.confidence, reading: false });
+      if (!ocr.detectedValue) {
+        const text = (ocr.rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 140);
+        setError(`OCR não encontrou o valor. Preencha manualmente. Texto lido: ${text || "(vazio)"}`);
+      }
+    } catch {
+      setDraftEvidence(scope, key, side, { reading: false });
+      setError("Não foi possível ler a imagem com OCR. Você ainda pode preencher o valor manualmente.");
+    }
+  }, [extractWithOcr, setDraftEvidence]);
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
+      if (isTextEditingTarget(event.target) || !pasteTarget) return;
       const file = extractImageFromClipboard(event.clipboardData ?? null);
-
-      if (!file) {
-        return;
-      }
-
+      if (!file) return;
+      const [scope, key, side] = pasteTarget.split(":") as [DraftScope, string, EvidenceSide];
       event.preventDefault();
-
-      handlePastedImage(file);
+      void applyImage(scope, key, side, file);
     };
-
     window.addEventListener("paste", onPaste);
-    return () => {
-      window.removeEventListener("paste", onPaste);
-    };
-  }, [handlePastedImage]);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [applyImage, pasteTarget]);
 
-  useEffect(() => {
-    if (startCurrency !== "USD" && endCurrency !== "USD") {
-      return;
-    }
+  const resolveBrlValue = useCallback(async (draft: EvidenceDraft) => {
+    const amount = parseMoneyInput(draft.value);
+    if (amount === null) throw new Error("Preencha um valor válido para todas as modelos.");
+    if (draft.currency === "BRL") return { value: draft.value.trim(), moneyMetadata: { currency: "BRL" as const, originalAmountCents: Math.round(amount * 100) } };
+    const response = await api.get<FxRateResponse>("/fx/usd-brl");
+    const rate = Number(response.data.rate);
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error("Cotação USD/BRL indisponível.");
+    return { value: formatBrl(amount * rate), moneyMetadata: { currency: "USD" as const, originalAmountCents: Math.round(amount * 100), fxRate: rate, fxProvider: response.data.provider ?? "AwesomeAPI", fxQuotedAt: response.data.quotedAt ?? new Date().toISOString() } };
+  }, []);
+  const valuePayload = useCallback(async (draft: EvidenceDraft) => {
+    if (!draft.evidenceId) throw new Error("Envie uma imagem para cada campo solicitado.");
+    const resolved = await resolveBrlValue(draft);
+    return { evidenceId: draft.evidenceId, ocrConfidence: draft.confidence ?? undefined, ocrDetectedValue: resolved.value, manualConfirmedValue: resolved.value, moneyMetadata: resolved.moneyMetadata };
+  }, [resolveBrlValue]);
 
-    let cancelled = false;
-    api
-      .get<FxRateResponse>("/fx/usd-brl")
-      .then((response) => {
-        const rate = Number(response.data.rate);
-        if (!cancelled && Number.isFinite(rate) && rate > 0) {
-          setFxRate(rate);
-        }
-      })
-      .catch(() => {
-        // cotacao indisponivel: MPH do turno fica oculto enquanto houver valor em USD
-      });
+  const addModel = (scope: "live" | "retroactive") => {
+    const drafts = scope === "live" ? liveDrafts : retroDrafts;
+    const nextRoom = rooms.find((room) => !drafts.some((draft) => draft.modelTagId === room.id));
+    if (!nextRoom || drafts.length >= 2) return;
+    (scope === "live" ? setLiveDrafts : setRetroDrafts)((current) => [...current, emptyModelDraft(nextRoom.id)]);
+  };
+  const removeModel = (scope: "live" | "retroactive", key: string) => {
+    (scope === "live" ? setLiveDrafts : setRetroDrafts)((current) => current.length > 1 ? current.filter((item) => item.key !== key) : current);
+  };
+  const updateModel = (scope: "live" | "retroactive", key: string, modelTagId: string) => {
+    (scope === "live" ? setLiveDrafts : setRetroDrafts)((current) => current.map((item) => item.key === key ? { ...item, modelTagId } : item));
+  };
+  const feedbackFor = (requestError: unknown, fallback: string) => requestError instanceof Error && !("response" in requestError)
+    ? requestError.message : getApiErrorMessage(requestError, fallback);
 
-return () => {
-      cancelled = true;
-    };
-  }, [startCurrency, endCurrency]);
-
-  const currentTurnMph = useMemo(() => {
-    if (!currentShift) {
-      return null;
-    }
-
-    const startNum = parseMoneyInput(startValue);
-    const endNum = parseMoneyInput(endValue);
-    if (startNum === null || endNum === null) {
-      return null;
-    }
-
-    const startMs = new Date(startAt).getTime();
-    const endMs = new Date(endAt).getTime();
-    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
-      return null;
-    }
-
-    const startBrl = startCurrency === "USD" ? (fxRate !== null ? startNum * fxRate : null) : startNum;
-    const endBrl = endCurrency === "USD" ? (fxRate !== null ? endNum * fxRate : null) : endNum;
-    if (startBrl === null || endBrl === null) {
-      return null;
-    }
-
-    const gross = endBrl - startBrl;
-    const hours = (endMs - startMs) / 3600000;
-    if (hours <= 0) {
-      return null;
-    }
-
-    return { gross, hours, mph: gross / hours };
-  }, [currentShift, startValue, endValue, startCurrency, endCurrency, startAt, endAt, fxRate]);
-
-  if (user?.role === "MANAGER") {
-    return (
-      <section className="stack-gap">
-        <div className="page-header">
-          <div>
-            <h1>Horários</h1>
-            <p>Gerencie seus turnos</p>
-          </div>
-        </div>
-        <div className="card">
-          <h2>Visao do gerente</h2>
-          <p>Use Chatters, Tags e Pagamento para administrar a operacao.</p>
-        </div>
-      </section>
-    );
-  }
-
-  if (loading) {
-    return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1><p>Bata seu ponto de entrada e saída</p></div></div><div className="card skeleton-list" aria-label="Carregando turnos"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div></section>;
-  }
-
-  if (!currentShift && rooms.length === 0) {
-    return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1><p>Bata seu ponto de entrada e saída</p></div></div><div className="card"><p className="empty-hint">Você ainda não possui uma tag de modelo vinculada. Peça a um gerente para liberar um modelo antes de iniciar o turno.</p></div></section>;
-  }
-
-  const startShift = async (event: FormEvent) => {
-    event.preventDefault();
-    setError(null);
-    setStarting(true);
-
-    if (!startEvidenceId) {
-      setError("Envie ou cole a imagem inicial antes de iniciar o turno.");
-      setStarting(false);
-      return;
-    }
-
-    if (!notificationsEnabled) {
-      setError("Ative as notificações nas Preferências antes de abrir o ponto.");
-      setStarting(false);
-      return;
-    }
-
-    const startedAtIso = parseDateTimeLocalToIso(startAt);
-    if (!startedAtIso) {
-      setError("Preencha uma data/hora de inicio valida.");
-      setStarting(false);
-      return;
-    }
-
+  const submitLiveStart = async (event: FormEvent) => {
+    event.preventDefault(); setError(null); setSubmitting(true);
     try {
-      const resolved = await resolveBrlValue(startValue, startCurrency);
-      const response = await api.post("/chatter/shifts/start", {
-        modelTagId,
-        startedAt: startedAtIso,
-        startEvidenceId,
-        ocrDetectedValue: resolved.brlValue,
-        manualConfirmedValue: resolved.brlValue,
-        notificationsEnabled: true,
-        ocrConfidence: startConfidence ?? undefined,
-        moneyMetadata: resolved.moneyMetadata
-      });
-      setCurrentShift(response.data.shift);
-      await loadData();
-      toast.success("Turno iniciado com sucesso.");
-    } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel iniciar o turno.");
-      toast.error(feedback);
-    } finally {
-      setStarting(false);
-    }
+      if (!notificationsEnabled) throw new Error("Ative as notificações nas Preferências antes de abrir o ponto.");
+      const startedAt = parseDateTimeLocalToIso(liveStartAt);
+      if (!startedAt) throw new Error("Preencha uma data/hora inicial válida.");
+      const shifts = await Promise.all(liveDrafts.map(async (draft) => ({ modelTagId: draft.modelTagId, ...(await valuePayload(draft.start)) })));
+      await api.post("/chatter/shifts/start-batch", { startedAt, notificationsEnabled: true, shifts });
+      toast.success(shifts.length === 2 ? "Pontos iniciados nas duas modelos." : "Ponto iniciado com sucesso.");
+      setLiveDrafts([emptyModelDraft(rooms[0]?.id ?? "")]); await loadData();
+    } catch (requestError: unknown) { const message = feedbackFor(requestError, "Não foi possível iniciar o ponto."); setError(message); toast.error(message); }
+    finally { setSubmitting(false); }
   };
 
-  const endShift = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!currentShift) {
-      return;
-    }
-
-    setError(null);
-    setEnding(true);
-
-    if (!endEvidenceId) {
-      setError("Envie ou cole a imagem final antes de encerrar o turno.");
-      setEnding(false);
-      return;
-    }
-
-    const endedAtIso = parseDateTimeLocalToIso(endAt);
-    if (!endedAtIso) {
-      setError("Preencha uma data/hora de batida valida.");
-      setEnding(false);
-      return;
-    }
-
+  const submitClose = async (event: FormEvent) => {
+    event.preventDefault(); setError(null); setSubmitting(true);
     try {
-      const resolved = await resolveBrlValue(endValue, endCurrency);
-      await api.post(`/chatter/shifts/${currentShift.id}/end`, {
-        endedAt: endedAtIso,
-        endEvidenceId,
-        ocrDetectedValue: resolved.brlValue,
-        manualConfirmedValue: resolved.brlValue,
-        ocrConfidence: endConfidence ?? undefined,
-        negativeJustification: negativeJustification || undefined,
-        moneyMetadata: resolved.moneyMetadata
-      });
-
-      await loadData();
-      toast.success("Turno encerrado com sucesso.");
-      setCurrentShift(null);
-      setStartImageName("");
-      setStartEvidenceId("");
-      setStartAt(toDateTimeLocalValue(new Date()));
-      setStartValue("");
-      setStartCurrency("BRL");
-      setStartConfidence(null);
-      setEndImageName("");
-      setEndEvidenceId("");
-      setEndAt(toDateTimeLocalValue(new Date()));
-      setEndValue("");
-      setEndCurrency("BRL");
-      setEndConfidence(null);
-      setNegativeJustification("");
-    } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel encerrar o turno.");
-      toast.error(feedback);
-    } finally {
-      setEnding(false);
-    }
+      const endedAt = parseDateTimeLocalToIso(closeAt);
+      if (!endedAt) throw new Error("Preencha uma data/hora final válida.");
+      const shifts = await Promise.all(closingDrafts.map(async (draft) => ({ shiftId: draft.shift.id, ...(await valuePayload(draft.end)), negativeJustification: draft.negativeJustification || undefined })));
+      await api.post("/chatter/shifts/end-batch", { endedAt, shifts });
+      toast.success(shifts.length === 2 ? "Pontos encerrados nas duas modelos." : "Ponto encerrado com sucesso.");
+      setCloseAt(toDateTimeLocalValue(new Date())); await loadData();
+    } catch (requestError: unknown) { const message = feedbackFor(requestError, "Não foi possível encerrar o ponto."); setError(message); toast.error(message); }
+    finally { setSubmitting(false); }
   };
 
-  const deleteShift = async () => {
-    if (!currentShift) {
-      return;
-    }
-
-    setError(null);
-    setDeleting(true);
-
+  const submitRetroactive = async (event: FormEvent) => {
+    event.preventDefault(); setError(null); setSubmitting(true);
     try {
-      await api.delete(`/chatter/shifts/${currentShift.id}`);
-      setConfirmDelete(false);
-      setCurrentShift(null);
-      setStartImageName("");
-      setStartEvidenceId("");
-      setStartAt(toDateTimeLocalValue(new Date()));
-      setStartValue("");
-      setStartCurrency("BRL");
-      setStartConfidence(null);
-      setEndImageName("");
-      setEndEvidenceId("");
-      setEndAt(toDateTimeLocalValue(new Date()));
-      setEndValue("");
-      setEndCurrency("BRL");
-      setEndConfidence(null);
-      setNegativeJustification("");
-      toast.success("Turno cancelado com sucesso.");
-    } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel cancelar o turno.");
-      toast.error(feedback);
-    } finally {
-      setDeleting(false);
-    }
+      const startedAt = parseDateTimeLocalToIso(retroStartAt); const endedAt = parseDateTimeLocalToIso(retroEndAt);
+      if (!startedAt || !endedAt) throw new Error("Preencha os horários de entrada e saída.");
+      const shifts = await Promise.all(retroDrafts.map(async (draft) => ({ modelTagId: draft.modelTagId, start: await valuePayload(draft.start), end: await valuePayload(draft.end), negativeJustification: draft.negativeJustification || undefined })));
+      await api.post("/chatter/shifts/retroactive-batch", { startedAt, endedAt, shifts });
+      toast.success(shifts.length === 2 ? "Turnos anteriores lançados nas duas modelos." : "Turno anterior lançado com sucesso.");
+      setRetroDrafts([emptyModelDraft(rooms[0]?.id ?? "")]);
+    } catch (requestError: unknown) { const message = feedbackFor(requestError, "Não foi possível lançar o turno anterior."); setError(message); toast.error(message); }
+    finally { setSubmitting(false); }
   };
 
-  return (
-    <section className="stack-gap">
-      <div className="page-header">
-        <div>
-          <h1>Horários</h1>
-          <p>Bata seu ponto de entrada e saída</p>
-        </div>
-      </div>
+  const cancelCurrentBatch = async () => {
+    setSubmitting(true);
+    try {
+      const batchId = currentShifts[0]?.batchId;
+      if (batchId && currentShifts.every((shift) => shift.batchId === batchId)) await api.delete(`/chatter/shifts/batches/${batchId}`);
+      else await Promise.all(currentShifts.map((shift) => api.delete(`/chatter/shifts/${shift.id}`)));
+      setConfirmCancel(false); toast.success("Ponto aberto cancelado."); await loadData();
+    } catch (requestError: unknown) { toast.error(getApiErrorMessage(requestError, "Não foi possível cancelar o ponto.")); }
+    finally { setSubmitting(false); }
+  };
 
-      {!currentShift ? (
-        <form className="card form-grid" onSubmit={startShift}>
-          <h2>Iniciar turno</h2>
-          {!notificationsEnabled ? <div className="warning-box" role="alert">Para abrir o ponto, ative as notificações do navegador em <Link to="/config">Preferências</Link>. Assim os lembretes e avisos de meia-noite chegarão mesmo com o sistema em segundo plano.</div> : null}
+  const closeMph = useMemo(() => closingDrafts.map((draft) => {
+    if (draft.start.currency !== "BRL" || draft.end.currency !== "BRL") return null;
+    const start = parseMoneyInput(draft.start.value); const end = parseMoneyInput(draft.end.value);
+    const hours = (new Date(closeAt).getTime() - new Date(draft.shift.startedAt).getTime()) / 3_600_000;
+    return start !== null && end !== null && hours > 0 ? (end - start) / hours : null;
+  }), [closeAt, closingDrafts]);
 
-          <div className="form-grid-2">
-            <label>
-              Modelo
-              <select value={modelTagId} onChange={(e) => setModelTagId(e.target.value)} required>
-                {rooms.map((room) => (
-                  <option key={room.id} value={room.id}>
-                    {room.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+  if (user?.role === "MANAGER") return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1><p>Gerencie seus turnos</p></div></div><div className="card"><h2>Visão do gerente</h2><p>Use Equipe e Pagamentos para administrar a operação.</p></div></section>;
+  if (loading) return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1></div></div><div className="card skeleton-list"><div className="skeleton" /><div className="skeleton" /></div></section>;
+  if (!rooms.length && !currentShifts.length) return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1></div></div><div className="card"><p className="empty-hint">Você ainda não possui uma modelo vinculada. Peça a um gerente para liberar uma.</p></div></section>;
 
-            <label>
-              Início do ponto
-              <input
-                type="datetime-local"
-                value={startAt}
-                onChange={(e) => setStartAt(e.target.value)}
-                required
-              />
-            </label>
-          </div>
-
-          <ImageDropzone
-            title="Print do faturamento (início)"
-            fileName={startImageName}
-            reading={readingStartImage}
-            onFile={(file) => void applyStartImage(file)}
-          />
-
-          <MoneyField
-            value={startValue}
-            onValueChange={setStartValue}
-            currency={startCurrency}
-            onCurrencyChange={setStartCurrency}
-            confidence={startConfidence}
-            reading={readingStartImage}
-          />
-
-          <button className="primary-button" type="submit" disabled={starting || !notificationsEnabled}>
-            {starting ? "Iniciando..." : notificationsEnabled ? "Iniciar período" : "Ative as notificações para iniciar"}
-          </button>
-        </form>
-      ) : (
-        <form className="card form-grid" onSubmit={endShift}>
-          <h2>
-            Encerrar turno
-            <span className="status-badge open">Aberto em {currentShift.modelTag.name}</span>
-          </h2>
-
-          <label>
-            Batida do ponto
-            <input
-              type="datetime-local"
-              value={endAt}
-              onChange={(e) => setEndAt(e.target.value)}
-              required
-            />
-          </label>
-
-          <ImageDropzone
-            title="Print do faturamento (fim)"
-            fileName={endImageName}
-            reading={readingEndImage}
-            onFile={(file) => void applyEndImage(file)}
-          />
-
-          <MoneyField
-            value={endValue}
-            onValueChange={setEndValue}
-            currency={endCurrency}
-            onCurrencyChange={setEndCurrency}
-            confidence={endConfidence}
-            reading={readingEndImage}
-          />
-
-          {currentTurnMph ? (
-            <div className={`mph-chip ${currentTurnMph.gross < 0 ? "mph-negative" : ""}`}>
-              <span>MPH do turno</span>
-              <strong>{formatBrl(currentTurnMph.mph)}/h</strong>
-              <small>
-                {formatBrl(currentTurnMph.gross)} bruto · {currentTurnMph.hours.toFixed(1)}h
-              </small>
-            </div>
-          ) : null}
-
-          {currentTurnMph && currentTurnMph.gross < 0 ? (
-            <div className="negative-warning">
-              Saldo negativo detectado — a justificativa abaixo é obrigatória para encerrar o turno.
-            </div>
-          ) : null}
-
-          {currentTurnMph && currentTurnMph.gross < 0 ? (
-            <label>
-              Justificativa para saldo negativo
-              <textarea
-                value={negativeJustification}
-                onChange={(e) => setNegativeJustification(e.target.value)}
-                placeholder="Explique por que o valor final ficou menor que o inicial."
-                required
-              />
-            </label>
-          ) : null}
-
-          <button className="primary-button" type="submit" disabled={ending}>
-            {ending ? "Encerrando..." : "Encerrar período"}
-          </button>
-
-          <button
-            type="button"
-            className="danger-button"
-            onClick={() => setConfirmDelete(true)}
-            disabled={ending || deleting}
-          >
-            Cancelar turno
-          </button>
-        </form>
-      )}
-
-      <ModalDialog
-        open={confirmDelete && Boolean(currentShift)}
-        onClose={() => setConfirmDelete(false)}
-        ariaLabel="Cancelar turno"
-      >
-        {currentShift ? (
-          <>
-            <h2>Cancelar turno</h2>
-            <p>
-              Tem certeza que deseja excluir o turno aberto em <strong>{currentShift.modelTag.name}</strong>?
-              Essa ação não pode ser desfeita.
-            </p>
-            <div className="modal-actions">
-              <button className="secondary-button" onClick={() => setConfirmDelete(false)} disabled={deleting}>
-                Voltar
-              </button>
-              <button className="danger-button" onClick={() => void deleteShift()} disabled={deleting}>
-                {deleting ? "Excluindo..." : "Sim, excluir turno"}
-              </button>
-            </div>
-          </>
-        ) : null}
-      </ModalDialog>
-
-      {error ? <div className="error-box">{error}</div> : null}
-    </section>
+  const modelSelector = (scope: "live" | "retroactive", draft: ModelDraft, drafts: ModelDraft[]) => (
+    <div className="shift-model-heading"><label>Modelo<select value={draft.modelTagId} onChange={(event) => updateModel(scope, draft.key, event.target.value)} required>
+      {rooms.map((room) => <option key={room.id} value={room.id} disabled={drafts.some((item) => item.key !== draft.key && item.modelTagId === room.id)}>{room.name}</option>)}
+    </select></label>{drafts.length > 1 ? <button type="button" className="secondary-button compact-button" onClick={() => removeModel(scope, draft.key)}>Remover</button> : null}</div>
   );
+  const fields = (scope: DraftScope, draft: ModelDraft, side: EvidenceSide, label: string) => <ValueFields draftKey={draft.key} side={side} label={label} value={draft[side]} pasteTarget={pasteTarget}
+    onActivate={() => setPasteTarget(`${scope}:${draft.key}:${side}`)} onFile={(file) => void applyImage(scope, draft.key, side, file)} onChange={(patch) => setDraftEvidence(scope, draft.key, side, patch)} />;
+
+  return <section className="stack-gap shifts-page">
+    <div className="page-header"><div><h1>Horários</h1><p>Registre pontos atuais ou lance um período anterior</p></div></div>
+    <div className="shift-mode-switch segmented" role="group" aria-label="Tipo de lançamento">
+      <button type="button" className={mode === "live" ? "active" : ""} aria-pressed={mode === "live"} onClick={() => { setMode("live"); setError(null); }}>Abrir ponto</button>
+      <button type="button" className={mode === "retroactive" ? "active" : ""} aria-pressed={mode === "retroactive"} onClick={() => { setMode("retroactive"); setError(null); }}>Lançar turno anterior</button>
+    </div>
+
+    {mode === "live" && !currentShifts.length ? <form className="card form-grid shift-workflow-card" onSubmit={submitLiveStart}>
+      <div className="section-header"><div><h2>Abrir ponto</h2><p>Uma ou duas modelos com o mesmo horário de entrada.</p></div></div>
+      {!notificationsEnabled ? <div className="warning-box" role="alert">Ative as notificações em <Link to="/config">Preferências</Link> antes de abrir o ponto.</div> : null}
+      <label className="shared-time-field">Início do ponto<input type="datetime-local" value={liveStartAt} onChange={(event) => setLiveStartAt(event.target.value)} required /></label>
+      <div className="shift-model-grid">{liveDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("live", draft, liveDrafts)}{fields("live", draft, "start", "início")}</section>)}</div>
+      {liveDrafts.length < 2 && rooms.length > liveDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("live")}>+ Adicionar segunda modelo</button> : null}
+      <button className="primary-button" type="submit" disabled={submitting || !notificationsEnabled}>{submitting ? "Abrindo…" : liveDrafts.length === 2 ? "Abrir os dois pontos" : "Abrir ponto"}</button>
+    </form> : null}
+
+    {mode === "live" && currentShifts.length ? <form className="card form-grid shift-workflow-card" onSubmit={submitClose}>
+      <div className="section-header"><div><h2>Encerrar turno</h2><p>{currentShifts.length === 2 ? "As duas modelos serão encerradas juntas." : `Ponto aberto em ${currentShifts[0].modelTag.name}.`}</p></div></div>
+      <label className="shared-time-field">Saída do ponto<input type="datetime-local" value={closeAt} onChange={(event) => setCloseAt(event.target.value)} required /></label>
+      <div className="shift-model-grid">{closingDrafts.map((draft, index) => <section className="shift-model-panel" key={draft.key}>
+        <div className="shift-model-heading"><div><span className="field-hint">Modelo</span><h3>{draft.shift.modelTag.name}</h3></div><span className="status-badge open">Em aberto</span></div>
+        {fields("closing", draft, "end", "fim")}
+        {closeMph[index] !== null ? <div className={`mph-chip ${closeMph[index]! < 0 ? "mph-negative" : ""}`}><span>MPH estimado</span><strong>{formatBrl(closeMph[index]!)}/h</strong></div> : null}
+        {hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setClosingDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}
+      </section>)}</div>
+      <div className="form-actions"><button type="button" className="danger-button" onClick={() => setConfirmCancel(true)} disabled={submitting}>Cancelar ponto</button><button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Encerrando…" : currentShifts.length === 2 ? "Encerrar os dois pontos" : "Encerrar ponto"}</button></div>
+    </form> : null}
+
+    {mode === "retroactive" ? <form className="card form-grid shift-workflow-card" onSubmit={submitRetroactive}>
+      <div className="section-header"><div><h2>Lançar turno anterior</h2><p>Entrada e saída são conferidas juntas para não cruzar outro turno.</p></div></div>
+      <div className="form-grid-2"><label>Entrada<input type="datetime-local" value={retroStartAt} onChange={(event) => setRetroStartAt(event.target.value)} required /></label><label>Saída<input type="datetime-local" value={retroEndAt} onChange={(event) => setRetroEndAt(event.target.value)} required /></label></div>
+      <div className="shift-model-grid">{retroDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("retroactive", draft, retroDrafts)}<div className="retro-evidence-grid">{fields("retroactive", draft, "start", "início")}{fields("retroactive", draft, "end", "fim")}</div>{hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setRetroDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}</section>)}</div>
+      {retroDrafts.length < 2 && rooms.length > retroDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("retroactive")}>+ Adicionar segunda modelo</button> : null}
+      <button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Lançando…" : retroDrafts.length === 2 ? "Lançar os dois turnos" : "Lançar turno anterior"}</button>
+    </form> : null}
+
+    {error ? <div className="error-box" role="alert">{error}</div> : null}
+    <ModalDialog open={confirmCancel} onClose={() => !submitting && setConfirmCancel(false)} ariaLabel="Cancelar ponto aberto"><h2>Cancelar {currentShifts.length === 2 ? "os pontos" : "o ponto"}?</h2><p>Os comprovantes serão removidos e a ação ficará registrada.</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setConfirmCancel(false)} disabled={submitting}>Voltar</button><button className="danger-button" type="button" onClick={() => void cancelCurrentBatch()} disabled={submitting}>{submitting ? "Cancelando…" : "Confirmar cancelamento"}</button></div></ModalDialog>
+  </section>;
 };

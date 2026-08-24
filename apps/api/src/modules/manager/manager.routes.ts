@@ -7,7 +7,7 @@ import { computeMph, formatHours, getReportedShiftDurationMs } from "../mph/mph"
 import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pagination";
 import { auditRequestMetadata } from "../../utils/audit";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../../services/evidence-cleanup";
-import { PAYMENTS_UPDATED_EVENT } from "./manager.events";
+import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM, PAYMENTS_UPDATED_EVENT } from "./manager.events";
 import { businessDateKey, businessDateKeysInclusive } from "../../utils/time";
 import { MAX_PAYOUT_PERCENTAGE, MIN_PAYOUT_PERCENTAGE } from "../../utils/payout";
 
@@ -612,6 +612,58 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     });
 
     return { shift: updated };
+  });
+
+  fastify.delete("/shifts/:shiftId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const { shiftId } = shiftIdParamsSchema.parse(request.params);
+    const shift = await fastify.prisma.shift.findUnique({
+      where: { id: shiftId },
+      include: {
+        earnings: true,
+        chatter: { select: { id: true, displayName: true } },
+        modelTag: { select: { id: true, name: true } },
+        startEvidence: { select: { id: true, sha256: true } },
+        endEvidence: { select: { id: true, sha256: true } }
+      }
+    });
+    if (!shift) return reply.code(404).send({ message: "Turno não encontrado." });
+    if (shift.earnings?.status === EarningsStatus.PAID || shift.earnings?.paymentId) {
+      return reply.code(409).send({ message: "Turnos já pagos não podem ser apagados." });
+    }
+    const evidence = [shift.startEvidence, shift.endEvidence].filter((item): item is NonNullable<typeof item> => Boolean(item));
+    await fastify.prisma.$transaction(async (tx) => {
+      await queueEvidencePurge(tx, evidence.map((item) => item.id));
+      await tx.shiftReconciliation.deleteMany({ where: { shiftId: shift.id } });
+      await tx.earnings.deleteMany({ where: { shiftId: shift.id } });
+      await tx.shift.delete({ where: { id: shift.id } });
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub,
+        action: AuditAction.SHIFT_DELETED,
+        targetType: "Shift",
+        targetId: shift.id,
+        metadata: {
+          deletedByManager: true,
+          batchId: shift.batchId,
+          chatterId: shift.chatter.id,
+          chatterName: shift.chatter.displayName,
+          modelTagId: shift.modelTag.id,
+          modelName: shift.modelTag.name,
+          status: shift.status,
+          startedAt: shift.startedAt.toISOString(),
+          endedAt: shift.endedAt?.toISOString() ?? null,
+          grossAmountCents: shift.grossAmountCents,
+          payoutAmountCents: shift.payoutAmountCents,
+          chatterVerifiedAt: shift.chatterVerifiedAt?.toISOString() ?? null,
+          evidence: evidence.map((item) => ({ id: item.id, sha256: item.sha256 })),
+          ...auditRequestMetadata(request)
+        }
+      } });
+    });
+    fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, { shiftId: shift.id, operation: "deleted" });
+    fastify.io.to(MANAGER_ROOM).emit(PAYMENTS_UPDATED_EVENT, { chatterId: shift.chatter.id, shiftId: shift.id });
+    return { success: true };
   });
 
   fastify.get("/tags", { preHandler: [fastify.authenticate] }, async (request, reply) => {

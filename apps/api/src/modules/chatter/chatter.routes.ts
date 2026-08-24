@@ -9,6 +9,7 @@ import { getMonthRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
 import { calculatePayoutCents } from "../../utils/payout";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { queueEvidencePurge } from "../../services/evidence-cleanup";
+import { assertNoShiftOverlap, assertOpenShiftLimit, lockShiftChatter, lockShiftModels, ShiftOverlapError } from "./shift-overlap";
 
 const moneyMetadataSchema = z.object({
   currency: z.enum(["BRL", "USD"]).default("BRL"),
@@ -141,7 +142,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(403).send({ message: "Acesso restrito a chatters." });
     }
 
-    const shift = await fastify.prisma.shift.findFirst({
+    const shifts = await fastify.prisma.shift.findMany({
       where: {
         chatterId: authUser.sub,
         status: ShiftStatus.OPEN
@@ -159,7 +160,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       }
     });
 
-    return { shift };
+    return { shifts, shift: shifts[0] ?? null };
   });
 
   fastify.get("/shifts/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -371,6 +372,13 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const updatedShift = await fastify.prisma.$transaction(async (tx) => {
+      await lockShiftModels(tx, [shift.modelTagId]);
+      await assertNoShiftOverlap(tx, {
+        modelTagId: shift.modelTagId,
+        startedAt,
+        endedAt,
+        excludeShiftIds: [shift.id]
+      });
       const updated = await tx.shift.update({
         where: {
           id: shift.id
@@ -528,7 +536,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const existingOpenShift = await fastify.prisma.shift.findFirst({
-      where: { status: ShiftStatus.OPEN, OR: [{ modelTagId: body.modelTagId }, { chatterId: authUser.sub }] },
+      where: { status: ShiftStatus.OPEN, modelTagId: body.modelTagId },
       include: {
         chatter: {
           select: {
@@ -541,7 +549,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (existingOpenShift) {
       return reply.code(409).send({
-        message: existingOpenShift.chatter.id === authUser.sub ? "Você já possui um turno aberto." : "Já existe um chatter em turno aberto para essa modelo.",
+        message: "Já existe um chatter em turno aberto para essa modelo.",
         openShift: {
           id: existingOpenShift.id,
           chatter: existingOpenShift.chatter,
@@ -582,6 +590,10 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     let shift;
     try {
       shift = await fastify.prisma.$transaction(async (tx) => {
+      await lockShiftChatter(tx, authUser.sub);
+      await lockShiftModels(tx, [body.modelTagId]);
+      await assertOpenShiftLimit(tx, authUser.sub, 1);
+      await assertNoShiftOverlap(tx, { modelTagId: body.modelTagId, startedAt });
       if (body.startEvidenceId) {
         const claimed = await tx.evidence.updateMany({
           where: { id: body.startEvidenceId, uploadedById: authUser.sub, status: EvidenceStatus.AVAILABLE, attachedAt: null },
@@ -626,6 +638,9 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       return created;
       });
     } catch (error) {
+      if (error instanceof ShiftOverlapError) {
+        return reply.code(409).send({ message: error.message, conflictingShiftId: error.conflictingShiftId });
+      }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return reply.code(409).send({ message: "Outro turno foi aberto ao mesmo tempo. Atualize a página e tente novamente." });
       }
@@ -720,6 +735,13 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       : [];
 
     const closedShift = await fastify.prisma.$transaction(async (tx) => {
+      await lockShiftModels(tx, [shift.modelTagId]);
+      await assertNoShiftOverlap(tx, {
+        modelTagId: shift.modelTagId,
+        startedAt: shift.startedAt,
+        endedAt,
+        excludeShiftIds: [shift.id]
+      });
       if (body.endEvidenceId) {
         const claimed = await tx.evidence.updateMany({
           where: { id: body.endEvidenceId, uploadedById: authUser.sub, status: EvidenceStatus.AVAILABLE, attachedAt: null },

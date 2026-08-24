@@ -98,6 +98,7 @@ export type ChatMessage = {
 
 export type Shift = {
   id: string;
+  batchId?: string | null;
   modelTagId: string;
   modelTag: { id: string; name: string };
   status: string;

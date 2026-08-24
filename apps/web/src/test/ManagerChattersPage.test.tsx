@@ -54,4 +54,19 @@ describe("ManagerChattersPage", () => {
     expect(await screen.findByText("Nova tag de modelo")).toBeInTheDocument();
     expect(screen.queryByText("Novo chatter")).not.toBeInTheDocument();
   });
+
+  it("mostra o total líquido do chatter em vez da produção bruta", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/manager/tags") return Promise.resolve({ data: { tags: [] } });
+      return Promise.resolve({ data: {
+        items: [{ id: "chatter-1", username: "julia", displayName: "Julia", isActive: true,
+          totalGrossFormatted: "R$ 1.000,00", totalPayoutFormatted: "R$ 200,00", modelTags: [] }],
+        pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 }
+      } });
+    });
+    render(<MemoryRouter><ToastProvider><ManagerChattersPage /></ToastProvider></MemoryRouter>);
+    expect(await screen.findByText("Total líquido")).toBeInTheDocument();
+    expect(screen.getByText("R$ 200,00")).toBeInTheDocument();
+    expect(screen.queryByText("R$ 1.000,00")).not.toBeInTheDocument();
+  });
 });

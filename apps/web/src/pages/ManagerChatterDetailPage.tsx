@@ -60,6 +60,8 @@ export const ManagerChatterDetailPage = () => {
   const [savingNotesId, setSavingNotesId] = useState<string | null>(null);
   const [resetPassword, setResetPassword] = useState<string | null>(null);
   const [resettingPassword, setResettingPassword] = useState(false);
+  const [shiftToDelete, setShiftToDelete] = useState<Shift | null>(null);
+  const [deletingShift, setDeletingShift] = useState(false);
   const [payoutDraft, setPayoutDraft] = useState("20");
   const [savingPayout, setSavingPayout] = useState(false);
   const [search, setSearch] = useState("");
@@ -166,6 +168,21 @@ export const ManagerChatterDetailPage = () => {
     }
   };
 
+  const deleteShift = async () => {
+    if (!shiftToDelete) return;
+    setDeletingShift(true);
+    try {
+      await api.delete(`/manager/shifts/${shiftToDelete.id}`);
+      toast.success("Turno apagado com sucesso.");
+      setShiftToDelete(null);
+      await loadData();
+    } catch (requestError: unknown) {
+      toast.error(getApiErrorMessage(requestError, "Não foi possível apagar o turno."));
+    } finally {
+      setDeletingShift(false);
+    }
+  };
+
   const totalPages = shiftPagination.totalPages;
   const safePage = shiftPagination.page;
   const pageShifts = shifts;
@@ -210,6 +227,25 @@ export const ManagerChatterDetailPage = () => {
 
       <ModalDialog open={Boolean(resetPassword)} onClose={() => setResetPassword(null)} ariaLabel="Redefinir senha">
         {resetPassword ? <><h2>Redefinir senha</h2><p>O chatter será desconectado em todos os dispositivos e precisará trocar esta senha no próximo acesso.</p><label>Senha temporária<input value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} minLength={8} autoComplete="new-password" /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setResetPassword(null)} disabled={resettingPassword}>Cancelar</button><button className="primary-button" onClick={() => void submitPasswordReset()} disabled={resettingPassword || resetPassword.length < 8}>{resettingPassword ? "Redefinindo…" : "Redefinir e encerrar sessões"}</button></div></> : null}
+      </ModalDialog>
+
+      <ModalDialog open={Boolean(shiftToDelete)} onClose={() => !deletingShift && setShiftToDelete(null)} ariaLabel="Apagar turno">
+        {shiftToDelete ? <>
+          <h2>Apagar turno?</h2>
+          <p>Esta ação removerá o turno de <strong>{shiftToDelete.modelTag.name}</strong>, seus ganhos pendentes e os comprovantes associados.</p>
+          <div className="delete-shift-summary">
+            <span>{formatDateTime(shiftToDelete.startedAt)}</span>
+            <span>até {shiftToDelete.endedAt ? formatDateTime(shiftToDelete.endedAt) : "agora (em aberto)"}</span>
+            <strong>{shiftToDelete.payoutAmountFormatted ?? "Sem payout calculado"}</strong>
+          </div>
+          {shiftToDelete.earnings?.status === "PAID" ? <div className="warning-box" role="alert">Este turno já foi pago e permanece protegido.</div> : null}
+          <div className="modal-actions">
+            <button className="secondary-button" type="button" onClick={() => setShiftToDelete(null)} disabled={deletingShift}>Cancelar</button>
+            <button className="danger-button" type="button" onClick={() => void deleteShift()} disabled={deletingShift || shiftToDelete.earnings?.status === "PAID"}>
+              {deletingShift ? "Apagando…" : "Apagar definitivamente"}
+            </button>
+          </div>
+        </> : null}
       </ModalDialog>
 
       <form className="card form-grid payout-settings-card" onSubmit={(event) => { event.preventDefault(); void savePayout(); }}>
@@ -360,6 +396,15 @@ export const ManagerChatterDetailPage = () => {
                       {savingNotesId === shift.id ? "Salvando..." : "Salvar observação"}
                     </button>
                   ) : null}
+                  <button
+                    type="button"
+                    className="danger-button manager-delete-shift"
+                    disabled={shift.earnings?.status === "PAID"}
+                    title={shift.earnings?.status === "PAID" ? "Turnos pagos não podem ser apagados" : "Apagar este turno"}
+                    onClick={() => setShiftToDelete(shift)}
+                  >
+                    Apagar turno
+                  </button>
                 </section>
               </div>
             </article>
