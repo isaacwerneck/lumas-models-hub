@@ -10,6 +10,7 @@ import { env } from "./config/env";
 import prismaPlugin from "./plugins/prisma";
 import authPlugin from "./plugins/auth";
 import socketPlugin from "./plugins/socket";
+import shiftRemindersPlugin from "./plugins/shift-reminders";
 import storagePlugin from "./plugins/storage";
 import authRoutes from "./modules/auth/auth.routes";
 import chatterRoutes from "./modules/chatter/chatter.routes";
@@ -21,6 +22,9 @@ import mphRoutes from "./modules/mph/mph.routes";
 import notificationRoutes from "./modules/notifications/notification.routes";
 import reportRoutes from "./modules/reports/report.routes";
 import evidenceRoutes from "./modules/evidence/evidence.routes";
+import paymentReceiptRoutes from "./modules/payment-receipts/payment-receipt.routes";
+import reconciliationRoutes from "./modules/reconciliation/reconciliation.routes";
+import workspaceRoutes from "./modules/workspace/workspace.routes";
 
 const registerRouteSet = async (app: FastifyInstance) => {
   app.get("/health", async () => {
@@ -46,6 +50,9 @@ const registerRouteSet = async (app: FastifyInstance) => {
   app.register(notificationRoutes, { prefix: "/notifications" });
   app.register(reportRoutes, { prefix: "/manager/reports" });
   app.register(evidenceRoutes, { prefix: "/evidence" });
+  app.register(paymentReceiptRoutes);
+  app.register(reconciliationRoutes);
+  app.register(workspaceRoutes);
 };
 
 export const buildApp = () => {
@@ -134,6 +141,7 @@ export const buildApp = () => {
   app.register(storagePlugin);
   app.register(authPlugin);
   app.register(socketPlugin);
+  app.register(shiftRemindersPlugin);
 
   app.register(async (legacy) => {
     legacy.addHook("onSend", async (_request, reply) => {

@@ -2,6 +2,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import type { Role } from "../types";
 import { SessionStatusScreen } from "./SessionStatusScreen";
+import { getDefaultRoute } from "../lib/lastVisitedRoute";
 
 export const ProtectedRoute = ({
   children,
@@ -22,7 +23,7 @@ export const ProtectedRoute = ({
   }
 
   if (roles && !roles.includes(user.role)) {
-    return <Navigate to="/home" replace />;
+    return <Navigate to={getDefaultRoute(user.role)} replace />;
   }
 
   if (user.mustChangePassword && location.pathname !== "/config") {

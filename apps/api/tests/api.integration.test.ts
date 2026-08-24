@@ -34,12 +34,41 @@ const createTestEvidence = async (uploadedById: string, name: string) => app.pri
     sha256: crypto.randomUUID().replaceAll("-", "")
   }
 });
+const makeShiftPayable = async (shiftId: string) => {
+  const shift = await app.prisma.shift.update({ where: { id: shiftId }, data: { chatterVerifiedAt: new Date() } });
+  const statementImport = await app.prisma.salesStatementImport.create({ data: {
+    managerId,
+    modelTagId: shift.modelTagId,
+    originalName: `test-${shiftId}.xlsx`,
+    fileSha256: crypto.randomUUID().replaceAll("-", ""),
+    vendorName: "Chatter Test",
+    coverageStart: shift.startedAt,
+    coverageEnd: shift.endedAt ?? shift.startedAt,
+    rowCount: 1,
+    confirmedRowCount: 1,
+    excludedRowCount: 0,
+    totalSalesCents: shift.grossAmountCents ?? 0,
+    totalCommissionCents: shift.grossAmountCents ?? 0,
+    unmatchedRowCount: 0
+  } });
+  await app.prisma.shiftReconciliation.create({ data: {
+    importId: statementImport.id,
+    shiftId,
+    shiftReviewRevision: shift.reviewRevision,
+    statementCommissionCents: shift.grossAmountCents ?? 0,
+    reportedGrossCents: shift.grossAmountCents ?? 0,
+    deltaCents: 0,
+    matchedRowCount: 1,
+    status: "MATCHED"
+  } });
+};
 
 beforeAll(async () => {
   await app.ready();
   const prisma = app.prisma;
   await prisma.storageDeletionJob.deleteMany(); await prisma.notification.deleteMany(); await prisma.auditLog.deleteMany(); await prisma.chatMessage.deleteMany();
-  await prisma.paymentHistory.deleteMany(); await prisma.earnings.deleteMany(); await prisma.shift.deleteMany(); await prisma.evidence.deleteMany();
+  await prisma.modelWorksheetCell.deleteMany(); await prisma.modelWorksheet.deleteMany(); await prisma.shiftReconciliation.deleteMany(); await prisma.salesStatementImport.deleteMany();
+  await prisma.paymentHistory.deleteMany(); await prisma.paymentReceipt.deleteMany(); await prisma.earnings.deleteMany(); await prisma.shift.deleteMany(); await prisma.evidence.deleteMany();
   await prisma.refreshSession.deleteMany(); await prisma.chatterModelTag.deleteMany(); await prisma.modelTag.deleteMany(); await prisma.user.deleteMany();
   const passwordHash = await bcrypt.hash("Password@123", 4);
   const [manager, chatter, other, tag, otherTag] = await prisma.$transaction([
@@ -280,7 +309,7 @@ describe("gerência de chatters e tags", () => {
   it("bloqueia tag inativa em novas operações sem apagar histórico", async () => {
     await app.inject({ method: "PATCH", url: `/api/v1/manager/tags/${otherTagId}`, headers: auth(managerToken), payload: { isActive: false } });
     const evidence = await createTestEvidence(otherChatterId, "tag-inativa.webp");
-    const rejected = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: { modelTagId: otherTagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" } });
+    const rejected = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: { modelTagId: otherTagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } });
     expect(rejected.statusCode).toBe(403);
     await app.inject({ method: "PATCH", url: `/api/v1/manager/tags/${otherTagId}`, headers: auth(managerToken), payload: { isActive: true } });
     await app.prisma.evidence.delete({ where: { id: evidence.id } });
@@ -291,7 +320,8 @@ describe("gerência de chatters e tags", () => {
 describe("turnos", () => {
   it("retorna turno atual vazio", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) }); expect(json(r).shift).toBeNull(); });
   it("rejeita início sem imagem", async () => { const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId } }); expect(r.statusCode).toBe(400); });
-  it("rejeita tag não vinculada", async () => { const evidence = await createTestEvidence(otherChatterId, "sem-tag.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" } }); expect(r.statusCode).toBe(403); });
+  it("exige notificações ativadas para iniciar", async () => { const evidence = await createTestEvidence(chatterId, "notificacao-obrigatoria.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" } }); expect(r.statusCode).toBe(403); await app.prisma.evidence.delete({ where: { id: evidence.id } }); });
+  it("rejeita tag não vinculada", async () => { const evidence = await createTestEvidence(otherChatterId, "sem-tag.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(403); });
   it("impede dois turnos simultâneos sob requisições concorrentes", async () => {
     const evidences = await Promise.all([
       createTestEvidence(chatterId, "concorrente-a.webp"),
@@ -301,15 +331,15 @@ describe("turnos", () => {
       method: "POST",
       url: "/api/v1/chatter/shifts/start",
       headers: auth(chatterToken),
-      payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" }
+      payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true }
     })));
     expect(responses.map((response) => response.statusCode).sort()).toEqual([201, 409]);
     const createdId = json(responses.find((response) => response.statusCode === 201)!).shift.id;
     await app.prisma.shift.delete({ where: { id: createdId } });
     await app.prisma.evidence.deleteMany({ where: { id: { in: evidences.map((evidence) => evidence.id) } } });
   });
-  it("inicia turno", async () => { const evidence = await createTestEvidence(chatterId, "inicio.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" } }); expect(r.statusCode).toBe(201); openShiftId = json(r).shift.id; });
-  it("rejeita segundo turno aberto", async () => { const evidence = await createTestEvidence(chatterId, "inicio-duplicado.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" } }); expect(r.statusCode).toBe(409); });
+  it("inicia turno", async () => { const evidence = await createTestEvidence(chatterId, "inicio.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(201); openShiftId = json(r).shift.id; });
+  it("rejeita segundo turno aberto", async () => { const evidence = await createTestEvidence(chatterId, "inicio-duplicado.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(409); });
   it("retorna turno atual", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) }); expect(json(r).shift.id).toBe(openShiftId); });
   it("rejeita encerramento sem imagem", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: {} }); expect(r.statusCode).toBe(400); });
   it("encerra turno positivo", async () => { const evidence = await createTestEvidence(chatterId, "fim.webp"); const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: { endEvidenceId: evidence.id, manualConfirmedValue: "R$ 140,00" } }); expect(r.statusCode).toBe(200); });
@@ -321,7 +351,7 @@ describe("turnos", () => {
   it("cria turno negativo com justificativa", async () => {
     const startEvidence = await createTestEvidence(chatterId, "negativo-inicio.webp");
     const endEvidence = await createTestEvidence(chatterId, "negativo-fim.webp");
-    const start = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: startEvidence.id, manualConfirmedValue: "R$ 100,00" } }); negativeShiftId = json(start).shift.id;
+    const start = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: startEvidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); negativeShiftId = json(start).shift.id;
     const rejected = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${negativeShiftId}/end`, headers: auth(chatterToken), payload: { endEvidenceId: endEvidence.id, manualConfirmedValue: "R$ 90,00" } }); expect(rejected.statusCode).toBe(400);
     const end = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${negativeShiftId}/end`, headers: auth(chatterToken), payload: { endEvidenceId: endEvidence.id, manualConfirmedValue: "R$ 90,00", negativeJustification: "Ajuste" } }); expect(end.statusCode).toBe(200);
   });
@@ -440,7 +470,20 @@ describe("comprovantes privados", () => {
 describe("pagamentos, chat, notificações e relatórios", () => {
   it("retorna resumo do chatter", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/payment/summary", headers: auth(chatterToken) }); expect(r.statusCode).toBe(200); });
   it("lista saldos do gerente", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/manager/payments/balances?page=1&pageSize=20", headers: auth(managerToken) }); expect(r.statusCode).toBe(200); expect(json(r).items.length).toBeGreaterThan(0); });
-  it("registra pagamento idempotente", async () => {
+  it("registra pagamento idempotente sem exigir conciliação", async () => {
+    const pending = await app.prisma.earnings.findMany({ where: { chatterId, status: "PENDING" }, select: { shiftId: true } });
+    await app.prisma.shift.updateMany({
+      where: { id: { in: pending.map((item) => item.shiftId) } },
+      data: { chatterVerifiedAt: new Date() }
+    });
+    const balancesResponse = await app.inject({
+      method: "GET",
+      url: "/api/v1/manager/payments/balances?page=1&pageSize=20",
+      headers: auth(managerToken)
+    });
+    const balance = json(balancesResponse).items.find((item: { id: string }) => item.id === chatterId);
+    expect(balance.payableCents).toBeGreaterThan(0);
+    expect(balance.payableCents).toBe(balance.verifiedCents);
     const headers = { ...auth(managerToken), "idempotency-key": "payment-main-test" };
     const first = await app.inject({ method: "POST", url: "/api/v1/manager/payments/pay", headers, payload: { chatterId } });
     const retry = await app.inject({ method: "POST", url: "/api/v1/manager/payments/pay", headers, payload: { chatterId } });
@@ -453,9 +496,10 @@ describe("pagamentos, chat, notificações e relatórios", () => {
     const shift = await app.prisma.shift.create({ data: {
       chatterId, modelTagId: tagId, status: "CLOSED", startedAt: new Date("2026-08-20T12:00:00.000Z"), endedAt: new Date("2026-08-20T13:00:00.000Z"),
       startImageUrl: "legacy:test-start.webp", endImageUrl: "legacy:test-end.webp", startValueCents: 0, endValueCents: 4000,
-      grossAmountCents: 4000, payoutAmountCents: 1000, commissionDivisor: 4
+      grossAmountCents: 4000, payoutAmountCents: 1000, commissionDivisor: 4, chatterVerifiedAt: new Date()
     } });
     await app.prisma.earnings.create({ data: { shiftId: shift.id, chatterId, amountCents: 1000 } });
+    await makeShiftPayable(shift.id);
     const responses = await Promise.all(["concurrent-a", "concurrent-b"].map((key) => app.inject({
       method: "POST", url: "/api/v1/manager/payments/pay",
       headers: { ...auth(managerToken), "idempotency-key": key }, payload: { chatterId }

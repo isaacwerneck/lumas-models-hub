@@ -1,0 +1,3 @@
+ALTER TABLE "ModelWorksheet"
+  ALTER COLUMN "rowCount" SET DEFAULT 20,
+  ALTER COLUMN "columnCount" SET DEFAULT 6;

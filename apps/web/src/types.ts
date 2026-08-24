@@ -6,6 +6,7 @@ export type AuthUser = {
   displayName: string;
   role: Role;
   mustChangePassword?: boolean;
+  shiftReminderIntervalMinutes?: 15 | 30 | 45 | 60;
 };
 
 export type ChatRoom = {

@@ -10,6 +10,7 @@ import type { OcrExtractResponse, FxRateResponse } from "../types/api";
 import { useToast } from "../components/Toast";
 import { getApiErrorMessage } from "../lib/apiError";
 import { ModalDialog } from "../components/ModalDialog";
+import { Link } from "react-router-dom";
 
 type Shift = {
   id: string;
@@ -96,6 +97,7 @@ export const ShiftsPage = () => {
   const [fxRate, setFxRate] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const notificationsEnabled = typeof Notification !== "undefined" && Notification.permission === "granted";
 
   const extractWithOcr = useCallback(async (file: File) => {
     const formData = new FormData();
@@ -340,7 +342,7 @@ return () => {
   }
 
   if (loading) {
-    return <section className="stack-gap"><div className="card skeleton-list" aria-label="Carregando turnos"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div></section>;
+    return <section className="stack-gap"><div className="page-header"><div><h1>Horários</h1><p>Bata seu ponto de entrada e saída</p></div></div><div className="card skeleton-list" aria-label="Carregando turnos"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div></section>;
   }
 
   if (!currentShift && rooms.length === 0) {
@@ -354,6 +356,12 @@ return () => {
 
     if (!startEvidenceId) {
       setError("Envie ou cole a imagem inicial antes de iniciar o turno.");
+      setStarting(false);
+      return;
+    }
+
+    if (!notificationsEnabled) {
+      setError("Ative as notificações nas Preferências antes de abrir o ponto.");
       setStarting(false);
       return;
     }
@@ -373,6 +381,7 @@ return () => {
         startEvidenceId,
         ocrDetectedValue: resolved.brlValue,
         manualConfirmedValue: resolved.brlValue,
+        notificationsEnabled: true,
         ocrConfidence: startConfidence ?? undefined,
         moneyMetadata: resolved.moneyMetadata
       });
@@ -491,6 +500,7 @@ return () => {
       {!currentShift ? (
         <form className="card form-grid" onSubmit={startShift}>
           <h2>Iniciar turno</h2>
+          {!notificationsEnabled ? <div className="warning-box" role="alert">Para abrir o ponto, ative as notificações do navegador em <Link to="/config">Preferências</Link>. Assim os lembretes e avisos de meia-noite chegarão mesmo com o sistema em segundo plano.</div> : null}
 
           <div className="form-grid-2">
             <label>
@@ -531,8 +541,8 @@ return () => {
             reading={readingStartImage}
           />
 
-          <button className="primary-button" type="submit" disabled={starting}>
-            {starting ? "Iniciando..." : "Iniciar período"}
+          <button className="primary-button" type="submit" disabled={starting || !notificationsEnabled}>
+            {starting ? "Iniciando..." : notificationsEnabled ? "Iniciar período" : "Ative as notificações para iniciar"}
           </button>
         </form>
       ) : (

@@ -26,7 +26,8 @@ const startShiftSchema = z.object({
   ocrRawText: z.string().optional(),
   ocrConfidence: z.number().min(0).max(1).optional(),
   ocrDetectedValue: z.string().optional(),
-  manualConfirmedValue: z.string().optional()
+  manualConfirmedValue: z.string().optional(),
+  notificationsEnabled: z.boolean().optional().default(false)
 });
 
 const closeShiftSchema = z.object({
@@ -93,14 +94,22 @@ const ensureChatterRole = (role: Role) => {
 
 const chatterRoutes: FastifyPluginAsync = async (fastify) => {
   const ensureEditableEarnings = async (chatterId: string, shiftId: string) => {
-    const earnings = await fastify.prisma.earnings.findUnique({
-      where: { shiftId }
+    const shift = await fastify.prisma.shift.findFirst({
+      where: { id: shiftId, chatterId },
+      include: { earnings: true }
     });
 
-    if (earnings && earnings.status === EarningsStatus.PAID) {
+    if (shift?.earnings?.status === EarningsStatus.PAID) {
       return {
         editable: false,
         message: "Lancamentos de ganho ja pago nao podem ser editados ou apagados."
+      };
+    }
+
+    if (shift?.chatterVerifiedAt) {
+      return {
+        editable: false,
+        message: "Desfaça a confirmação dos honorários antes de editar ou apagar este lançamento."
       };
     }
 
@@ -198,6 +207,95 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     return { shifts: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : query.limit, total) };
   });
 
+  fastify.get("/payment/review", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+    if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    const query = paginationSchema.parse(request.query);
+    const where: Prisma.ShiftWhereInput = {
+      chatterId: authUser.sub,
+      status: ShiftStatus.CLOSED,
+      OR: [
+        { earnings: { is: null } },
+        { earnings: { is: { status: EarningsStatus.PENDING } } }
+      ]
+    };
+    const [shifts, total] = await fastify.prisma.$transaction([
+      fastify.prisma.shift.findMany({
+        where,
+        include: {
+          modelTag: { select: { id: true, name: true } },
+          earnings: true,
+          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          reconciliations: {
+            include: { statementImport: { select: { id: true, originalName: true, vendorName: true, createdAt: true } } },
+            orderBy: { createdAt: "desc" },
+            take: 10
+          }
+        },
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        ...paginationArgs(query.page, query.pageSize)
+      }),
+      fastify.prisma.shift.count({ where })
+    ]);
+    const items = shifts.map((shift) => {
+      const reconciliation = shift.reconciliations.find((item) => item.shiftReviewRevision === shift.reviewRevision) ?? null;
+      return {
+        ...shift,
+        reconciliations: undefined,
+        reconciliation,
+        startValueFormatted: centsToBrl(shift.startValueCents),
+        endValueFormatted: shift.endValueCents !== null ? centsToBrl(shift.endValueCents) : null,
+        grossAmountFormatted: shift.grossAmountCents !== null ? centsToBrl(shift.grossAmountCents) : null,
+        payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null,
+        earnings: shift.earnings ? { ...shift.earnings, amountFormatted: centsToBrl(shift.earnings.amountCents) } : null
+      };
+    });
+    return { items, shifts: items, pagination: paginationMeta(query.page, query.pageSize, total) };
+  });
+
+  fastify.post("/shifts/:shiftId/verify", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+    if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    const { shiftId } = shiftParamsSchema.parse(request.params);
+    const shift = await fastify.prisma.shift.findFirst({
+      where: { id: shiftId, chatterId: authUser.sub, status: ShiftStatus.CLOSED },
+      include: { earnings: true }
+    });
+    if (!shift) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
+    if (shift.earnings?.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
+    if (shift.chatterVerifiedAt) return { shiftId, chatterVerifiedAt: shift.chatterVerifiedAt, reviewRevision: shift.reviewRevision };
+    const verifiedAt = new Date();
+    await fastify.prisma.$transaction([
+      fastify.prisma.shift.update({ where: { id: shift.id }, data: { chatterVerifiedAt: verifiedAt } }),
+      fastify.prisma.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.SHIFT_VERIFIED, targetType: "Shift", targetId: shift.id,
+        metadata: { reviewRevision: shift.reviewRevision, ...auditRequestMetadata(request) }
+      } })
+    ]);
+    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: shift.id });
+    return { shiftId, chatterVerifiedAt: verifiedAt, reviewRevision: shift.reviewRevision };
+  });
+
+  fastify.delete("/shifts/:shiftId/verify", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { sub: string; role: Role };
+    if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
+    const { shiftId } = shiftParamsSchema.parse(request.params);
+    const shift = await fastify.prisma.shift.findFirst({ where: { id: shiftId, chatterId: authUser.sub, status: ShiftStatus.CLOSED }, include: { earnings: true } });
+    if (!shift) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
+    if (shift.earnings?.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
+    if (!shift.chatterVerifiedAt) return { success: true };
+    await fastify.prisma.$transaction([
+      fastify.prisma.shift.update({ where: { id: shift.id }, data: { chatterVerifiedAt: null } }),
+      fastify.prisma.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.SHIFT_UNVERIFIED, targetType: "Shift", targetId: shift.id,
+        metadata: { reviewRevision: shift.reviewRevision, ...auditRequestMetadata(request) }
+      } })
+    ]);
+    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: shift.id });
+    return { success: true };
+  });
+
   fastify.patch("/shifts/:shiftId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
 
@@ -281,7 +379,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           commissionDivisor: env.COMMISSION_DIVISOR,
           payoutAmountCents,
           negativeJustification: grossAmountCents < 0 ? negativeJustification?.trim() ?? null : null,
-          notes: body.notes !== undefined ? (body.notes.trim() === "" ? null : body.notes.trim()) : shift.notes
+          notes: body.notes !== undefined ? (body.notes.trim() === "" ? null : body.notes.trim()) : shift.notes,
+          reviewRevision: { increment: 1 }
         },
         include: {
           modelTag: {
@@ -399,6 +498,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const isV1 = request.url.startsWith("/api/v1/");
     if (isV1 && !body.startEvidenceId) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
     if (!isV1 && !body.startEvidenceId && !body.startImageUrl) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    if (!body.notificationsEnabled) return reply.code(403).send({ message: "Ative as notificações do navegador nas Preferências antes de abrir o ponto.", code: "NOTIFICATIONS_REQUIRED" });
     const startedAt = body.startedAt ? new Date(body.startedAt) : nowInBusinessTz().toDate();
 
     if (Number.isNaN(startedAt.getTime())) {
@@ -756,7 +856,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       where,
       orderBy: [{ paidAt: "desc" }, { id: "desc" }],
       include: {
-        manager: { select: { id: true, displayName: true } }
+        manager: { select: { id: true, displayName: true } },
+        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } }
       },
       ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
       }),
@@ -768,7 +869,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         totalCents: item.totalCents,
         totalFormatted: centsToBrl(item.totalCents),
         paidAt: item.paidAt,
-        manager: item.manager
+        manager: item.manager,
+        receipt: item.receipt
       }));
     return { history: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
   });

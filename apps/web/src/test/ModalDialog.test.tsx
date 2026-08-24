@@ -57,4 +57,17 @@ describe("ModalDialog", () => {
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(last).toHaveFocus();
   });
+
+  it("renderiza fora de containers com overflow para não cortar pré-visualizações", () => {
+    render(
+      <div style={{ overflow: "hidden", transform: "translateZ(0)" }}>
+        <ModalDialog open onClose={() => undefined} ariaLabel="Visualizador">
+          <span>Conteúdo</span>
+        </ModalDialog>
+      </div>
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Visualizador" });
+    expect(dialog.closest(".modal-overlay")?.parentElement).toBe(document.body);
+  });
 });

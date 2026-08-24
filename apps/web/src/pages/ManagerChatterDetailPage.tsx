@@ -23,6 +23,7 @@ type Shift = {
   endValueFormatted: string | null;
   grossAmountFormatted: string | null;
   payoutAmountFormatted: string | null;
+  chatterVerifiedAt: string | null;
   negativeJustification: string | null;
   notes: string | null;
   earnings: { amountFormatted: string; status: string; paidAt: string | null } | null;
@@ -159,8 +160,8 @@ export const ManagerChatterDetailPage = () => {
   }
 
   return (
-    <section className="stack-gap">
-      <div className="page-header">
+    <section className="stack-gap chatter-detail-page">
+      <div className="page-header chatter-detail-header">
         <div>
           <h1>{chatter.displayName}</h1>
           <p>
@@ -170,7 +171,7 @@ export const ManagerChatterDetailPage = () => {
             </span>
           </p>
         </div>
-        <div className="page-header-actions"><button type="button" className="secondary-button" onClick={() => setResetPassword(`Lumas@${crypto.randomUUID().slice(0, 8)}`)}>Redefinir senha</button><Link to="/chatters" className="back-link" aria-label="Voltar">
+        <div className="page-header-actions"><button type="button" className="secondary-button" onClick={() => setResetPassword(`Lumas@${crypto.randomUUID().slice(0, 8)}`)}>Redefinir senha</button><Link to="/chatters" className="back-link" aria-label="Voltar para a equipe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M19 12H5" />
             <path d="M12 19l-7-7 7-7" />
@@ -183,9 +184,9 @@ export const ManagerChatterDetailPage = () => {
       </ModalDialog>
 
       <div className="card form-grid">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+        <div className="chatter-tag-header">
           <h2>Tags de modelo</h2>
-          <Link to="/tags" className="secondary-button" style={{ fontSize: "0.8rem", padding: "0.35rem 0.75rem" }}>
+          <Link to="/tags" className="secondary-button">
             Gerenciar tags
           </Link>
         </div>
@@ -217,7 +218,7 @@ export const ManagerChatterDetailPage = () => {
         </button>
       </div>
 
-      <div className="card table-card" tabIndex={0} aria-label="Turnos do chatter">
+      <div className="card table-card manager-shifts-card" tabIndex={0} aria-label="Turnos do chatter">
         <h2>Horas subidas (turnos)</h2>
         <div className="list-toolbar">
           <input
@@ -239,75 +240,71 @@ export const ManagerChatterDetailPage = () => {
             { chatterId: chatter.id, ...(debouncedSearch ? { search: debouncedSearch } : {}) }
           )}>XLSX</button>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Modelo</th>
-              <th>Início</th>
-              <th>Fim</th>
-              <th>Imagem início</th>
-              <th>Valor início</th>
-              <th>Imagem fim</th>
-              <th>Valor fim</th>
-              <th>Bruto</th>
-              <th>Payout</th>
-              <th>Ganho</th>
-              <th>Observação</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pageShifts.map((shift) => (
-              <tr key={shift.id}>
-                <td>{shift.modelTag.name}</td>
-                <td>{formatDateTime(shift.startedAt)}</td>
-                <td>{shift.endedAt ? formatDateTime(shift.endedAt) : "—"}</td>
-                <td><EvidenceLink evidence={shift.startEvidence} fallbackName={shift.startImageUrl} /></td>
-                <td>{shift.startValueFormatted}</td>
-                <td><EvidenceLink evidence={shift.endEvidence} fallbackName={shift.endImageUrl} /></td>
-                <td>{shift.endValueFormatted ?? "—"}</td>
-                <td>{shift.grossAmountFormatted ?? "—"}</td>
-                <td>{shift.payoutAmountFormatted ?? "—"}</td>
-                <td>
+        <div className="manager-shift-list">
+          {pageShifts.map((shift) => (
+            <article className="manager-shift-card" key={shift.id}>
+              <header className="manager-shift-header">
+                <div className="manager-shift-identity">
+                  <span className="manager-shift-label">Modelo</span>
+                  <strong>{shift.modelTag.name}</strong>
+                </div>
+                <div className="manager-shift-period" aria-label="Período do turno">
+                  <div><span>Início</span><strong>{formatDateTime(shift.startedAt)}</strong></div>
+                  <span className="manager-shift-arrow" aria-hidden="true">→</span>
+                  <div><span>Fim</span><strong>{shift.endedAt ? formatDateTime(shift.endedAt) : "Em aberto"}</strong></div>
+                </div>
+                <div className="manager-earning-status">
+                  <span className={`status-badge ${shift.chatterVerifiedAt ? "paid" : "pending"}`}>
+                    {shift.chatterVerifiedAt ? "Confirmado pelo chatter" : "Aguardando confirmação"}
+                  </span>
                   {shift.earnings ? (
-                    <span
-                      className={
-                        shift.earnings.status === "PAID" ? "status-badge paid" : "status-badge pending"
-                      }
-                    >
-                      {shift.earnings.amountFormatted} ·{" "}
-                      {shift.earnings.status === "PAID" ? "Pago" : "Pendente"}
+                    <span className={`status-badge ${shift.earnings.status === "PAID" ? "paid" : "pending"}`}>
+                      {shift.earnings.amountFormatted} · {shift.earnings.status === "PAID" ? "Pago" : "Aguardando pagamento"}
                     </span>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-                <td>
-                  <div className="notes-cell">
-                    <textarea
-                      value={notesDraft[shift.id] ?? shift.notes ?? ""}
-                      onChange={(event) =>
-                        setNotesDraft((current) => ({ ...current, [shift.id]: event.target.value }))
-                      }
-                      placeholder="Observação opcional"
-                      rows={2}
-                      maxLength={500}
-                    />
-                    {(notesDraft[shift.id] ?? shift.notes ?? "") !== (shift.notes ?? "") ? (
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        disabled={savingNotesId === shift.id}
-                        onClick={() => void saveNotes(shift.id)}
-                      >
-                        {savingNotesId === shift.id ? "Salvando..." : "Salvar"}
-                      </button>
-                    ) : null}
-                  </div>
-                </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  ) : null}
+                </div>
+              </header>
+
+              <div className="manager-shift-body">
+                <section className="manager-shift-metrics" aria-label="Valores do turno">
+                  <div><span>Valor inicial</span><strong>{shift.startValueFormatted}</strong></div>
+                  <div><span>Valor final</span><strong>{shift.endValueFormatted ?? "—"}</strong></div>
+                  <div><span>Bruto</span><strong>{shift.grossAmountFormatted ?? "—"}</strong></div>
+                  <div className="manager-shift-payout"><span>Payout</span><strong>{shift.payoutAmountFormatted ?? "—"}</strong></div>
+                </section>
+
+                <section className="manager-shift-captures" aria-label="Capturas do turno">
+                  <div><span>Captura inicial</span><EvidenceLink evidence={shift.startEvidence} fallbackName={shift.startImageUrl} /></div>
+                  <div><span>Captura final</span><EvidenceLink evidence={shift.endEvidence} fallbackName={shift.endImageUrl} /></div>
+                </section>
+
+                <section className="manager-shift-notes" aria-label="Observação do turno">
+                  <label htmlFor={`shift-note-${shift.id}`}>Observação</label>
+                  <textarea
+                    id={`shift-note-${shift.id}`}
+                    value={notesDraft[shift.id] ?? shift.notes ?? ""}
+                    onChange={(event) =>
+                      setNotesDraft((current) => ({ ...current, [shift.id]: event.target.value }))
+                    }
+                    placeholder="Adicione uma observação opcional"
+                    rows={3}
+                    maxLength={500}
+                  />
+                  {(notesDraft[shift.id] ?? shift.notes ?? "") !== (shift.notes ?? "") ? (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={savingNotesId === shift.id}
+                      onClick={() => void saveNotes(shift.id)}
+                    >
+                      {savingNotesId === shift.id ? "Salvando..." : "Salvar observação"}
+                    </button>
+                  ) : null}
+                </section>
+              </div>
+            </article>
+          ))}
+        </div>
           {shifts.length === 0 ? (
             <p className="empty-hint">{search ? "Nenhum turno encontrado com essa busca." : "Nenhum turno registrado."}</p>
           ) : null}
@@ -321,9 +318,19 @@ export const ManagerChatterDetailPage = () => {
               >
                 Anterior
               </button>
-              <span className="pagination-info">
-                Página {safePage} de {totalPages}
-              </span>
+              <label className="pagination-page-select">
+                <span>Página</span>
+                <select
+                  aria-label="Selecionar página dos turnos"
+                  value={safePage}
+                  onChange={(event) => setPage(Number(event.target.value))}
+                >
+                  {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
+                    <option value={pageNumber} key={pageNumber}>{pageNumber}</option>
+                  ))}
+                </select>
+                <span>de {totalPages}</span>
+              </label>
               <button
                 type="button"
                 className="secondary-button"

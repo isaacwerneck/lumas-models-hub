@@ -2,9 +2,13 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginPage } from "../pages/LoginPage";
+import type { AuthUser } from "../types";
+
+const manager: AuthUser = { id: "manager-1", username: "julia", displayName: "Julia", role: "MANAGER" };
+const chatter: AuthUser = { id: "chatter-1", username: "bia", displayName: "Bia", role: "CHATTER" };
 
 const authMock = vi.hoisted(() => ({
-  user: null as null | { id: string },
+  user: null as AuthUser | null,
   status: "anonymous",
   login: vi.fn()
 }));
@@ -13,12 +17,15 @@ vi.mock("../auth/AuthContext", () => ({ useAuth: () => authMock }));
 const renderLogin = () => render(<MemoryRouter initialEntries={["/login"]}><Routes>
   <Route path="/login" element={<LoginPage />} />
   <Route path="/home" element={<h1>Área inicial</h1>} />
+  <Route path="/horarios" element={<h1>Turnos</h1>} />
+  <Route path="/pagamento" element={<h1>Ganhos</h1>} />
 </Routes></MemoryRouter>);
 
 describe("LoginPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStorage.clear();
+    localStorage.clear();
     authMock.user = null;
     authMock.status = "anonymous";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: async () => "(flor)" }));
@@ -26,7 +33,7 @@ describe("LoginPage", () => {
   afterEach(() => cleanup());
 
   it("normaliza o usuário, autentica e navega", async () => {
-    authMock.login.mockResolvedValue(undefined);
+    authMock.login.mockResolvedValue(manager);
     renderLogin();
     fireEvent.change(screen.getByLabelText("Login"), { target: { value: "  JULIA  " } });
     fireEvent.change(screen.getByLabelText("Senha"), { target: { value: "Julia@123" } });
@@ -53,8 +60,18 @@ describe("LoginPage", () => {
     expect(screen.getByText("Verificando sessão")).toBeInTheDocument();
     view.unmount();
     authMock.status = "authenticated";
-    authMock.user = { id: "manager-1" };
+    authMock.user = manager;
     renderLogin();
     expect(await screen.findByRole("heading", { name: "Área inicial" })).toBeInTheDocument();
+  });
+
+  it("restaura a última tela válida da conta", async () => {
+    localStorage.setItem("lumas:last-visited:chatter-1", "/pagamento?page=2");
+    authMock.login.mockResolvedValue(chatter);
+    renderLogin();
+    fireEvent.change(screen.getByLabelText("Login"), { target: { value: "bia" } });
+    fireEvent.change(screen.getByLabelText("Senha"), { target: { value: "Bia@123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Entrar" }));
+    expect(await screen.findByRole("heading", { name: "Ganhos" })).toBeInTheDocument();
   });
 });

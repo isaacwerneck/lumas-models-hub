@@ -7,6 +7,7 @@ const listSchema = paginationSchema.extend({
 });
 
 const paramsSchema = z.object({ notificationId: z.string().min(1) });
+const preferencesSchema = z.object({ shiftReminderIntervalMinutes: z.union([z.literal(15), z.literal(30), z.literal(45), z.literal(60)]) });
 
 const notificationRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get("/", { preHandler: [fastify.authenticate] }, async (request) => {
@@ -14,6 +15,7 @@ const notificationRoutes: FastifyPluginAsync = async (fastify) => {
     const query = listSchema.parse(request.query);
     const where = {
       userId: authUser.sub,
+      isTransient: false,
       ...(query.unreadOnly ? { readAt: null } : {})
     };
 
@@ -24,10 +26,23 @@ const notificationRoutes: FastifyPluginAsync = async (fastify) => {
         ...paginationArgs(query.page, query.pageSize)
       }),
       fastify.prisma.notification.count({ where }),
-      fastify.prisma.notification.count({ where: { userId: authUser.sub, readAt: null } })
+      fastify.prisma.notification.count({ where: { userId: authUser.sub, isTransient: false, readAt: null } })
     ]);
 
     return { items, pagination: paginationMeta(query.page, query.pageSize, total), unreadCount };
+  });
+
+  fastify.get("/preferences", { preHandler: [fastify.authenticate] }, async (request) => {
+    const authUser = request.user as { sub: string };
+    const user = await fastify.prisma.user.findUniqueOrThrow({ where: { id: authUser.sub }, select: { shiftReminderIntervalMinutes: true } });
+    return { preferences: user };
+  });
+
+  fastify.patch("/preferences", { preHandler: [fastify.authenticate] }, async (request) => {
+    const authUser = request.user as { sub: string };
+    const body = preferencesSchema.parse(request.body);
+    const user = await fastify.prisma.user.update({ where: { id: authUser.sub }, data: body, select: { shiftReminderIntervalMinutes: true } });
+    return { preferences: user };
   });
 
   fastify.patch("/:notificationId/read", { preHandler: [fastify.authenticate] }, async (request, reply) => {

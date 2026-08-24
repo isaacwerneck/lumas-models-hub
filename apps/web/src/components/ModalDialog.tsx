@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { motionTokens } from "../lib/motion";
 
@@ -94,7 +95,7 @@ export const ModalDialog = ({
     ? { opacity: 0 }
     : { opacity: 0, y: motionTokens.distance.page, scale: motionTokens.scale.subtle };
 
-  return (
+  return createPortal(
     <AnimatePresence initial={false}>
       {open ? (
         <motion.div
@@ -124,6 +125,7 @@ export const ModalDialog = ({
           </motion.div>
         </motion.div>
       ) : null}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 };

@@ -1,4 +1,5 @@
 import axios from "axios";
+import type { InternalAxiosRequestConfig } from "axios";
 import type { AuthUser } from "../types";
 import { API_URL } from "./runtime";
 
@@ -17,6 +18,35 @@ export type SessionRefreshResult =
   | { status: "unavailable" };
 
 let accessToken: string | null = null;
+
+type TrackedRequestConfig = InternalAxiosRequestConfig & { _pageLoadTracked?: boolean };
+const pageLoadListeners = new Set<(pendingRequests: number) => void>();
+let pendingPageLoadRequests = 0;
+
+const emitPageLoadActivity = () => {
+  for (const listener of pageLoadListeners) listener(pendingPageLoadRequests);
+};
+
+const startPageLoadRequest = (config: TrackedRequestConfig) => {
+  if ((config.method ?? "get").toLowerCase() !== "get" || config._pageLoadTracked) return;
+  config._pageLoadTracked = true;
+  pendingPageLoadRequests += 1;
+  emitPageLoadActivity();
+};
+
+const finishPageLoadRequest = (config?: TrackedRequestConfig) => {
+  if (!config?._pageLoadTracked) return;
+  config._pageLoadTracked = false;
+  pendingPageLoadRequests = Math.max(0, pendingPageLoadRequests - 1);
+  emitPageLoadActivity();
+};
+
+export const getPendingPageLoadRequests = () => pendingPageLoadRequests;
+
+export const subscribePageLoadActivity = (listener: (pendingRequests: number) => void) => {
+  pageLoadListeners.add(listener);
+  return () => pageLoadListeners.delete(listener);
+};
 
 export const clearLegacyStoredAccessToken = () => {
   try {
@@ -98,6 +128,7 @@ export const refreshSession = async ({ notifyOnUnauthorized = false } = {}): Pro
 };
 
 api.interceptors.request.use((config) => {
+  startPageLoadRequest(config as TrackedRequestConfig);
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
   }
@@ -105,8 +136,12 @@ api.interceptors.request.use((config) => {
 });
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    finishPageLoadRequest(response.config as TrackedRequestConfig);
+    return response;
+  },
   async (error) => {
+    finishPageLoadRequest(error?.config as TrackedRequestConfig | undefined);
     const status = error?.response?.status;
     const originalRequest = error?.config as (typeof error.config & { _retry?: boolean }) | undefined;
     const requestUrl = String(originalRequest?.url ?? "");

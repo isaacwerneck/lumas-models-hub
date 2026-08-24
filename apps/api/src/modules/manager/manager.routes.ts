@@ -1,4 +1,4 @@
-import { AuditAction, EarningsStatus, Prisma, Role } from "@prisma/client";
+import { AuditAction, EarningsStatus, Prisma, ReconciliationStatus, Role } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { hashPassword } from "../../utils/password";
@@ -51,7 +51,10 @@ const chatterTagUpdateSchema = z.object({
 });
 
 const paySchema = z.object({
-  chatterId: z.string().min(1)
+  chatterId: z.string().min(1),
+  earningIds: z.array(z.string().min(1)).min(1).max(500).optional(),
+  expectedTotalCents: z.number().int().nonnegative().optional(),
+  receiptId: z.string().min(1).optional()
 });
 
 const analyticsQuerySchema = z.object({
@@ -870,27 +873,65 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
 
     const chatterIds = chatters.map((chatter) => chatter.id);
 
-    const pendingAgg = await fastify.prisma.earnings.groupBy({
-      by: ["chatterId"],
+    const pendingEarnings = await fastify.prisma.earnings.findMany({
       where: {
         chatterId: { in: chatterIds },
         status: EarningsStatus.PENDING
       },
-      _sum: { amountCents: true }
+      select: {
+        id: true,
+        chatterId: true,
+        amountCents: true,
+        shift: {
+          select: {
+            chatterVerifiedAt: true,
+            reviewRevision: true,
+            reconciliations: {
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              take: 1,
+              select: { id: true, status: true, shiftReviewRevision: true, deltaCents: true }
+            }
+          }
+        }
+      }
     });
 
-    const pendingByChatter = new Map(
-      pendingAgg.map((item) => [item.chatterId, item._sum.amountCents ?? 0])
-    );
+    const balances = new Map<string, { pending: number; verified: number; payable: number; blocked: number; payableIds: string[] }>();
+    for (const earning of pendingEarnings) {
+      const balance = balances.get(earning.chatterId) ?? { pending: 0, verified: 0, payable: 0, blocked: 0, payableIds: [] };
+      balance.pending += earning.amountCents;
+      if (earning.shift.chatterVerifiedAt) {
+        balance.verified += earning.amountCents;
+        const reconciliation = earning.shift.reconciliations[0];
+        const hasBlockingReconciliation = reconciliation?.shiftReviewRevision === earning.shift.reviewRevision
+          && reconciliation.status !== ReconciliationStatus.MATCHED
+          && reconciliation.status !== ReconciliationStatus.OVERRIDDEN;
+        const payable = !hasBlockingReconciliation;
+        if (payable) {
+          balance.payable += earning.amountCents;
+          balance.payableIds.push(earning.id);
+        } else {
+          balance.blocked += earning.amountCents;
+        }
+      }
+      balances.set(earning.chatterId, balance);
+    }
 
     const items = chatters.map((chatter) => {
-        const pendingCents = pendingByChatter.get(chatter.id) ?? 0;
+        const balance = balances.get(chatter.id) ?? { pending: 0, verified: 0, payable: 0, blocked: 0, payableIds: [] };
         return {
           id: chatter.id,
           displayName: chatter.displayName,
           isActive: chatter.isActive,
-          pendingCents,
-          pendingFormatted: centsToBrl(pendingCents)
+          pendingCents: balance.pending,
+          pendingFormatted: centsToBrl(balance.pending),
+          verifiedCents: balance.verified,
+          verifiedFormatted: centsToBrl(balance.verified),
+          payableCents: balance.payable,
+          payableFormatted: centsToBrl(balance.payable),
+          blockedCents: balance.blocked,
+          blockedFormatted: centsToBrl(balance.blocked),
+          payableEarningIds: balance.payableIds
         };
       });
     return { chatters: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
@@ -925,27 +966,73 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const pending = await tx.earnings.findMany({
         where: { chatterId: chatter.id, status: EarningsStatus.PENDING },
-        select: { id: true, shiftId: true, amountCents: true },
+        select: {
+          id: true,
+          shiftId: true,
+          amountCents: true,
+          shift: {
+            select: {
+              chatterVerifiedAt: true,
+              reviewRevision: true,
+              reconciliations: {
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                take: 1,
+                select: { id: true, status: true, shiftReviewRevision: true }
+              }
+            }
+          }
+        },
         orderBy: { id: "asc" }
       });
-      if (!pending.length) throw new Error("NO_PENDING_EARNINGS");
-      const totalCents = pending.reduce((acc, item) => acc + item.amountCents, 0);
+      const eligible = pending.filter((item) => {
+        const reconciliation = item.shift.reconciliations[0];
+        const hasBlockingReconciliation = reconciliation?.shiftReviewRevision === item.shift.reviewRevision
+          && reconciliation.status !== ReconciliationStatus.MATCHED
+          && reconciliation.status !== ReconciliationStatus.OVERRIDDEN;
+        return Boolean(item.shift.chatterVerifiedAt) && !hasBlockingReconciliation;
+      });
+      const requestedIds = body.earningIds ? new Set(body.earningIds) : null;
+      const selected = requestedIds ? eligible.filter((item) => requestedIds.has(item.id)) : eligible;
+      if (!selected.length) throw new Error("NO_PAYABLE_EARNINGS");
+      if (requestedIds && (selected.length !== requestedIds.size || body.earningIds?.length !== requestedIds.size)) throw new Error("INVALID_EARNING_SELECTION");
+      const totalCents = selected.reduce((acc, item) => acc + item.amountCents, 0);
+      if (body.expectedTotalCents !== undefined && body.expectedTotalCents !== totalCents) throw new Error("TOTAL_CHANGED");
+      if (body.receiptId) {
+        const receipt = await tx.paymentReceipt.findFirst({
+          where: { id: body.receiptId, uploadedById: authUser.sub, attachedAt: null, payment: { is: null } },
+          select: { id: true }
+        });
+        if (!receipt) throw new Error("INVALID_RECEIPT");
+      }
       const created = await tx.paymentHistory.create({
         data: {
           chatterId: chatter.id,
           managerId: authUser.sub,
           totalCents,
-          requestKey
+          requestKey,
+          receiptId: body.receiptId
         }
       });
+      if (body.receiptId) await tx.paymentReceipt.update({ where: { id: body.receiptId }, data: { attachedAt: now } });
       const paid = await tx.earnings.updateMany({
-        where: { id: { in: pending.map((item) => item.id) }, status: EarningsStatus.PENDING },
+        where: { id: { in: selected.map((item) => item.id) }, status: EarningsStatus.PENDING },
         data: { status: EarningsStatus.PAID, paidAt: now, paymentId: created.id }
       });
-      if (paid.count !== pending.length) throw new Error("CONCURRENT_PAYMENT");
+      if (paid.count !== selected.length) throw new Error("CONCURRENT_PAYMENT");
+
+      const reconciliationIds = selected
+        .map((item) => item.shift.reconciliations[0])
+        .filter((item): item is NonNullable<typeof item> => Boolean(item))
+        .map((item) => item.id);
+      if (reconciliationIds.length) {
+        await tx.shiftReconciliation.updateMany({
+          where: { id: { in: reconciliationIds } },
+          data: { paymentId: created.id }
+        });
+      }
 
       const shifts = await tx.shift.findMany({
-        where: { id: { in: pending.map((item) => item.shiftId) } },
+        where: { id: { in: selected.map((item) => item.shiftId) } },
         select: { startEvidenceId: true, endEvidenceId: true }
       });
       const evidenceIds = shifts.flatMap((item) => [item.startEvidenceId, item.endEvidenceId]).filter((id): id is string => Boolean(id));
@@ -961,7 +1048,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
             chatterUsername: chatter.username,
             totalCents,
             paymentId: created.id,
-            earningsCount: pending.length,
+            earningsCount: selected.length,
             purgedEvidenceCount,
             ...auditRequestMetadata(request)
           }
@@ -971,7 +1058,10 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       return { payment: created, purgedEvidenceCount, idempotent: false };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
-      if ((error as Error).message === "NO_PENDING_EARNINGS") return reply.code(400).send({ message: "Este chatter não possui saldo pendente." });
+      if ((error as Error).message === "NO_PAYABLE_EARNINGS") return reply.code(400).send({ message: "Não há horários confirmados disponíveis para pagamento." });
+      if ((error as Error).message === "INVALID_EARNING_SELECTION") return reply.code(409).send({ message: "A seleção contém horários não confirmados, com divergência no extrato ou já pagos. Atualize e tente novamente." });
+      if ((error as Error).message === "TOTAL_CHANGED") return reply.code(409).send({ message: "O total disponível mudou. Atualize os dados antes de confirmar o pagamento." });
+      if ((error as Error).message === "INVALID_RECEIPT") return reply.code(400).send({ message: "O comprovante é inválido, já foi utilizado ou pertence a outro gerente." });
       if ((error as Error).message === "CONCURRENT_PAYMENT" || (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code))) {
         return reply.code(409).send({ message: "O saldo foi alterado por outro pagamento. Atualize e tente novamente." });
       }
@@ -1016,7 +1106,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       orderBy: [{ paidAt: "desc" }, { id: "desc" }],
       include: {
         chatter: { select: { id: true, displayName: true } },
-        manager: { select: { id: true, displayName: true } }
+        manager: { select: { id: true, displayName: true } },
+        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } }
       },
       ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
       }),
@@ -1029,7 +1120,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         manager: item.manager,
         totalCents: item.totalCents,
         totalFormatted: centsToBrl(item.totalCents),
-        paidAt: item.paidAt
+        paidAt: item.paidAt,
+        receipt: item.receipt
       }));
     return { history: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
   });

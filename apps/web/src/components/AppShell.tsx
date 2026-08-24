@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, type ComponentType } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useState, type ComponentType } from "react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   BarChart3, CalendarClock, ChevronRight, CircleDollarSign, ClipboardList,
@@ -11,7 +11,10 @@ import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "./ThemeContext";
 import { NotificationCenter } from "./NotificationCenter";
 import { DotartSide } from "./DotartSide";
-import { motionDurations, motionTokens, pageMotion } from "../lib/motion";
+import { motionDurations, motionTokens } from "../lib/motion";
+import { ShiftReminderListener } from "./ShiftReminderListener";
+import { rememberLastVisitedRoute } from "../lib/lastVisitedRoute";
+import { RouteReadyBoundary } from "./RouteReadyBoundary";
 
 type NavigationItem = {
   to: string;
@@ -24,7 +27,7 @@ const managerNavigation: NavigationItem[] = [
   { to: "/home", label: "Visão geral", icon: BarChart3, mobilePrimary: true },
   { to: "/chatters", label: "Equipe", icon: Users, mobilePrimary: true },
   { to: "/pagamentos", label: "Pagamentos", icon: CircleDollarSign, mobilePrimary: true },
-  { to: "/chat", label: "Chat", icon: MessageCircle, mobilePrimary: true },
+  { to: "/central-modelo", label: "Central", icon: MessageCircle, mobilePrimary: true },
   { to: "/funcionario-do-mes", label: "Ranking", icon: Trophy },
   { to: "/auditoria", label: "Auditoria", icon: ClipboardList },
   { to: "/config", label: "Preferências", icon: Settings }
@@ -33,7 +36,7 @@ const managerNavigation: NavigationItem[] = [
 const chatterNavigation: NavigationItem[] = [
   { to: "/horarios", label: "Turnos", icon: CalendarClock, mobilePrimary: true },
   { to: "/pagamento", label: "Ganhos", icon: CircleDollarSign, mobilePrimary: true },
-  { to: "/chat", label: "Chat", icon: MessageCircle, mobilePrimary: true },
+  { to: "/central-modelo", label: "Central", icon: MessageCircle, mobilePrimary: true },
   { to: "/funcionario-do-mes", label: "Ranking", icon: Trophy, mobilePrimary: true },
   { to: "/config", label: "Preferências", icon: Settings }
 ];
@@ -60,6 +63,11 @@ export const AppShell = () => {
   const mobilePrimary = navigation.filter((item) => item.mobilePrimary).slice(0, 4);
   const desktopSplit = Math.ceil(navigation.length / 2);
 
+  useEffect(() => {
+    if (!user) return;
+    rememberLastVisitedRoute(user, location.pathname, location.search, location.hash);
+  }, [location.hash, location.pathname, location.search, user]);
+
   const handleLogout = async () => {
     await logout();
     navigate("/login", { replace: true });
@@ -67,6 +75,7 @@ export const AppShell = () => {
 
   return (
     <div className="app-stage original-stage">
+      <ShiftReminderListener />
       <div className="bg-atmosphere" aria-hidden="true">
         <div className="bg-aurora" />
         <div className="bg-particle p1" />
@@ -106,21 +115,9 @@ export const AppShell = () => {
 
         <section className="content-grid">
           <div className="content-area" id="main-content">
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div
-                key={location.pathname}
-                initial={reduceMotion ? false : pageMotion.initial}
-                animate={reduceMotion ? { opacity: 1 } : pageMotion.animate}
-                exit={reduceMotion ? { opacity: 0 } : pageMotion.exit}
-                transition={{
-                  duration: reduceMotion ? motionTokens.duration.instant : motionDurations.base,
-                  ease: motionTokens.easing.smooth
-                }}
-                className="page-transition"
-              >
-                <Outlet />
-              </motion.div>
-            </AnimatePresence>
+            <div key={location.pathname} className="page-transition">
+              <RouteReadyBoundary />
+            </div>
           </div>
         </section>
       </main>

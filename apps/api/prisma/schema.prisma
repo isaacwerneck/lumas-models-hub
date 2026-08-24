@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
 
@@ -23,6 +23,19 @@ enum EarningsStatus {
   PAID
 }
 
+enum ReconciliationStatus {
+  MATCHED
+  MISMATCH
+  OUT_OF_RANGE
+  AMBIGUOUS
+  OVERRIDDEN
+}
+
+enum WorksheetCellType {
+  TEXT
+  NUMBER
+}
+
 enum AuditAction {
   LOGIN
   LOGIN_FAILED
@@ -39,7 +52,12 @@ enum AuditAction {
   SHIFT_CLOSED
   SHIFT_UPDATED
   SHIFT_NOTES_UPDATED
+  SHIFT_VERIFIED
+  SHIFT_UNVERIFIED
   PAYMENT_MADE
+  STATEMENT_IMPORTED
+  RECONCILIATION_OVERRIDDEN
+  PAYMENT_RECEIPT_UPLOADED
   SHIFT_DELETED
   EVIDENCE_UPLOADED
   EVIDENCE_PURGED
@@ -50,6 +68,8 @@ enum AuditAction {
 enum NotificationType {
   OCR_LOW_CONFIDENCE
   NEGATIVE_SHIFT
+  SHIFT_OPEN_REMINDER
+  MIDNIGHT_SHIFT_WARNING
 }
 
 enum EvidenceStatus {
@@ -77,6 +97,7 @@ model User {
   lockedUntil         DateTime?
   authVersion         Int               @default(0)
   mustChangePassword  Boolean           @default(false)
+  shiftReminderIntervalMinutes Int      @default(60)
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -90,6 +111,10 @@ model User {
   auditEntries        AuditLog[]        @relation("AuditActor")
   notifications       Notification[]
   uploadedEvidence    Evidence[]
+  statementImports    SalesStatementImport[] @relation("StatementImportManager")
+  reconciliationOverrides ShiftReconciliation[] @relation("ReconciliationOverrideManager")
+  worksheetCells      ModelWorksheetCell[] @relation("WorksheetCellEditor")
+  paymentReceipts     PaymentReceipt[] @relation("PaymentReceiptUploader")
 
   @@index([role])
 }
@@ -104,6 +129,8 @@ model ModelTag {
   chatterLinks     ChatterModelTag[]
   shifts           Shift[]
   messages         ChatMessage[]
+  worksheet        ModelWorksheet?
+  statementImports SalesStatementImport[]
 }
 
 model ChatterModelTag {
@@ -156,6 +183,8 @@ model Shift {
   payoutAmountCents    Int?
   negativeJustification String?
   notes                String?
+  chatterVerifiedAt    DateTime?
+  reviewRevision       Int         @default(1)
 
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
@@ -165,6 +194,7 @@ model Shift {
   earnings             Earnings?
   startEvidence        Evidence?   @relation("StartEvidence", fields: [startEvidenceId], references: [id], onDelete: SetNull)
   endEvidence          Evidence?   @relation("EndEvidence", fields: [endEvidenceId], references: [id], onDelete: SetNull)
+  reconciliations      ShiftReconciliation[]
 
   @@index([chatterId, startedAt])
   @@index([modelTagId, status])
@@ -196,10 +226,13 @@ model PaymentHistory {
   totalCents Int
   paidAt     DateTime @default(now())
   requestKey String?  @unique
+  receiptId  String?  @unique
 
   chatter    User     @relation("ChatterPayments", fields: [chatterId], references: [id], onDelete: Restrict)
   manager    User     @relation("ManagerPayments", fields: [managerId], references: [id], onDelete: Restrict)
   earnings   Earnings[]
+  receipt    PaymentReceipt? @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  reconciliations ShiftReconciliation[]
 
   @@index([chatterId, paidAt])
 }
@@ -244,6 +277,106 @@ model AuditLog {
 
   @@index([action, createdAt])
   @@index([targetType, targetId])
+}
+
+model PaymentReceipt {
+  id           String   @id @default(cuid())
+  uploadedById String
+  storageKey   String   @unique
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String
+  attachedAt   DateTime?
+  createdAt    DateTime @default(now())
+
+  uploadedBy   User     @relation("PaymentReceiptUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+  payment      PaymentHistory?
+
+  @@index([uploadedById, createdAt])
+  @@index([attachedAt, createdAt])
+}
+
+model SalesStatementImport {
+  id                    String   @id @default(cuid())
+  managerId             String
+  modelTagId            String
+  originalName          String
+  fileSha256            String
+  vendorName            String
+  coverageStart         DateTime
+  coverageEnd           DateTime
+  rowCount              Int
+  confirmedRowCount     Int
+  excludedRowCount      Int
+  totalSalesCents       Int
+  totalCommissionCents  Int
+  unmatchedRowCount     Int
+  createdAt             DateTime @default(now())
+
+  manager               User     @relation("StatementImportManager", fields: [managerId], references: [id], onDelete: Restrict)
+  modelTag              ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
+  reconciliations       ShiftReconciliation[]
+
+  @@index([modelTagId, createdAt])
+  @@index([managerId, createdAt])
+}
+
+model ShiftReconciliation {
+  id                       String               @id @default(cuid())
+  importId                 String
+  shiftId                  String
+  shiftReviewRevision      Int
+  statementCommissionCents Int
+  reportedGrossCents       Int
+  deltaCents               Int
+  matchedRowCount          Int
+  status                   ReconciliationStatus
+  overriddenById           String?
+  overrideReason           String?
+  overriddenAt             DateTime?
+  paymentId                String?
+  createdAt                DateTime             @default(now())
+
+  statementImport          SalesStatementImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  shift                    Shift                @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  overriddenBy             User?                @relation("ReconciliationOverrideManager", fields: [overriddenById], references: [id], onDelete: Restrict)
+  payment                  PaymentHistory?      @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([importId, shiftId])
+  @@index([shiftId, shiftReviewRevision, createdAt])
+  @@index([paymentId])
+}
+
+model ModelWorksheet {
+  id          String   @id @default(cuid())
+  modelTagId  String   @unique
+  rowCount    Int      @default(20)
+  columnCount Int      @default(6)
+  revision    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  modelTag    ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Cascade)
+  cells       ModelWorksheetCell[]
+}
+
+model ModelWorksheetCell {
+  id          String            @id @default(cuid())
+  worksheetId String
+  rowIndex    Int
+  columnIndex Int
+  value       String
+  valueType   WorksheetCellType @default(TEXT)
+  version     Int               @default(1)
+  updatedById String
+  updatedAt   DateTime          @updatedAt
+
+  worksheet   ModelWorksheet    @relation(fields: [worksheetId], references: [id], onDelete: Cascade)
+  updatedBy   User              @relation("WorksheetCellEditor", fields: [updatedById], references: [id], onDelete: Restrict)
+
+  @@unique([worksheetId, rowIndex, columnIndex])
+  @@index([worksheetId, updatedAt])
 }
 
 model Evidence {
@@ -293,6 +426,7 @@ model Notification {
   sourceType       String
   sourceId         String
   metadata         Json?
+  isTransient      Boolean          @default(false)
   readAt           DateTime?
   createdAt        DateTime         @default(now())
 

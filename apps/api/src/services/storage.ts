@@ -112,3 +112,34 @@ export const newEvidenceKey = (userId: string) => {
   const now = new Date();
   return `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${userId}/${crypto.randomUUID()}.webp`;
 };
+
+const receiptExtension = (mimeType: string) => ({
+  "application/pdf": "pdf",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp"
+}[mimeType] ?? "bin");
+
+export const validatePaymentReceipt = async (input: Buffer, declaredMimeType: string) => {
+  const mimeType = declaredMimeType.toLowerCase();
+  if (mimeType === "application/pdf") {
+    if (input.length < 5 || input.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("UNSUPPORTED_RECEIPT");
+  } else if (["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+    const metadata = await sharp(input, { failOn: "error", limitInputPixels: 40_000_000 }).metadata();
+    const expected = mimeType === "image/jpeg" ? "jpeg" : mimeType.split("/")[1];
+    if (metadata.format !== expected) throw new Error("UNSUPPORTED_RECEIPT");
+  } else {
+    throw new Error("UNSUPPORTED_RECEIPT");
+  }
+
+  return {
+    buffer: input,
+    mimeType,
+    sha256: crypto.createHash("sha256").update(input).digest("hex")
+  };
+};
+
+export const newPaymentReceiptKey = (userId: string, mimeType: string) => {
+  const now = new Date();
+  return `payment-receipts/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${userId}/${crypto.randomUUID()}.${receiptExtension(mimeType)}`;
+};

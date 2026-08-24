@@ -320,6 +320,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         displayName: true,
         role: true,
         mustChangePassword: true,
+        shiftReminderIntervalMinutes: true,
         createdAt: true
       }
     });

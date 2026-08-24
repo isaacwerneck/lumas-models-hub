@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { Eye, UserRoundCheck, UserRoundX } from "lucide-react";
 import type { ChatterListItem, Pagination } from "@lumas/contracts";
 import { api } from "../lib/api";
 import { useToast } from "../components/Toast";
@@ -173,12 +174,25 @@ export const ManagerChattersPage = () => {
                     {chatter.isActive ? "Ativo" : "Inativo"}
                   </span>
                 </span>
-                <span className="cell center">
-                  <Link to={`/chatters/${chatter.id}`} className="secondary-button">
-                    Detalhes
+                <span className="cell center chatter-row-actions">
+                  <Link
+                    to={`/chatters/${chatter.id}`}
+                    className="chatter-action-button is-details"
+                    aria-label={`Ver detalhes de ${chatter.displayName}`}
+                  >
+                    <Eye size={15} aria-hidden="true" />
+                    <span>Detalhes</span>
                   </Link>
-                  <button className="secondary-button" onClick={() => void toggleActive(chatter)}>
-                    {chatter.isActive ? "Desativar" : "Ativar"}
+                  <button
+                    type="button"
+                    className={`chatter-action-button ${chatter.isActive ? "is-danger" : "is-activate"}`}
+                    onClick={() => void toggleActive(chatter)}
+                    aria-label={`${chatter.isActive ? "Desativar" : "Ativar"} ${chatter.displayName}`}
+                  >
+                    {chatter.isActive
+                      ? <UserRoundX size={15} aria-hidden="true" />
+                      : <UserRoundCheck size={15} aria-hidden="true" />}
+                    <span>{chatter.isActive ? "Desativar" : "Ativar"}</span>
                   </button>
                 </span>
               </Fragment>

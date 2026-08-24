@@ -14,7 +14,7 @@ export type AuthStatus = "restoring" | "authenticated" | "anonymous" | "unavaila
 type AuthContextValue = {
   user: AuthUser | null;
   status: AuthStatus;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<AuthUser>;
   logout: () => Promise<void>;
   retrySession: () => Promise<boolean>;
 };
@@ -100,6 +100,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     setUser(response.data.user);
     updateStatus("authenticated");
     channelRef.current?.postMessage({ type: "login" } satisfies AuthChannelMessage);
+    return response.data.user;
   }, [updateStatus]);
 
   const logout = useCallback(async () => {

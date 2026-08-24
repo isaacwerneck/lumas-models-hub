@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { useAuth } from "../auth/AuthContext";
 import { api, downloadApiFile, getAccessToken } from "../lib/api";
 import { SOCKET_URL } from "../lib/runtime";
 import { Sparkline } from "../components/charts/Sparkline";
@@ -56,14 +55,6 @@ const windowRange = (window: QuickWindow): { from?: string; to?: string } => {
 };
 
 export const HomePage = () => {
-  const { user } = useAuth();
-  const isManager = user?.role === "MANAGER";
-
-  // ---- chatter view state ----
-  const [pendingFormatted, setPendingFormatted] = useState("R$ 0,00");
-  const [lifetimeFormatted, setLifetimeFormatted] = useState("R$ 0,00");
-
-  // ---- manager view state ----
   const [window, setWindow] = useState<QuickWindow>("month");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -78,23 +69,8 @@ export const HomePage = () => {
   const [error, setError] = useState<string | null>(null);
   const analyticsRequestId = useRef(0);
 
-  // chatter view
+  // load filter options
   useEffect(() => {
-    if (isManager || !user) return;
-    void (async () => {
-      try {
-        const response = await api.get("/chatter/payment/summary");
-        setPendingFormatted(response.data.pendingFormatted);
-        setLifetimeFormatted(response.data.lifetimePaidFormatted);
-      } catch {
-        // mantem valores padrao
-      }
-    })();
-  }, [isManager, user]);
-
-  // load filter options (manager only)
-  useEffect(() => {
-    if (!isManager) return;
     void (async () => {
       try {
         const [tagsRes, chattersRes] = await Promise.all([
@@ -107,7 +83,7 @@ export const HomePage = () => {
         // filtros vazios
       }
     })();
-  }, [isManager]);
+  }, []);
 
   // build query params
   const params = useMemo(() => {
@@ -123,8 +99,6 @@ export const HomePage = () => {
   }, [window, fromDate, toDate, modelTagId, chatterId]);
 
   const loadAnalytics = useCallback(async (showLoading = false) => {
-    if (!isManager) return;
-
     const requestId = ++analyticsRequestId.current;
     if (showLoading) {
       setLoading(true);
@@ -147,7 +121,7 @@ export const HomePage = () => {
         setLoading(false);
       }
     }
-  }, [isManager, params]);
+  }, [params]);
 
   // Carga inicial e recarga quando os filtros mudam.
   useEffect(() => {
@@ -159,8 +133,6 @@ export const HomePage = () => {
 
   // Mantém o dashboard sincronizado com alterações feitas por chatters em outras sessões.
   useEffect(() => {
-    if (!isManager) return;
-
     const refresh = () => void loadAnalytics();
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") refresh();
@@ -188,30 +160,7 @@ export const HomePage = () => {
       socket?.io.off("reconnect", refresh);
       socket?.disconnect();
     };
-  }, [isManager, loadAnalytics]);
-
-  const chatterView = (
-      <div className="home-page-wrapper">
-        <div className="page-header">
-          <div>
-            <h1>Início</h1>
-            <p>Visão geral do seu painel</p>
-          </div>
-        </div>
-        <div className="glass-dashboard">
-          <div className="glass-grid">
-            <div className="glass-card glass-kpi">
-              <span>Saldo pendente</span>
-              <strong>{pendingFormatted}</strong>
-            </div>
-            <div className="glass-card glass-kpi">
-              <span>Total recebido na vida</span>
-              <strong>{lifetimeFormatted}</strong>
-            </div>
-          </div>
-        </div>
-      </div>
-  );
+  }, [loadAnalytics]);
 
   const summary = data?.summary;
   const daily = useMemo(() => data?.daily ?? [], [data]);
@@ -291,8 +240,6 @@ export const HomePage = () => {
       })),
     [data]
   );
-
-  if (!isManager) return chatterView;
 
   const exportByModel = () => {
     if (!data) return;

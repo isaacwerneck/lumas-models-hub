@@ -30,9 +30,3 @@ export const motionSprings = {
   responsive: { type: "spring", stiffness: 420, damping: 34, mass: 0.8 },
   gentle: { type: "spring", stiffness: 240, damping: 28, mass: 0.9 }
 } as const;
-
-export const pageMotion = {
-  initial: { opacity: 0, y: motionTokens.distance.page },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -motionTokens.distance.page }
-} as const;

@@ -22,7 +22,7 @@ export type ApiErrorResponse = z.infer<typeof ApiErrorSchema>;
 
 export const AuthUserSchema = z.object({
   id: z.string(), username: z.string(), displayName: z.string(), role: RoleSchema,
-  mustChangePassword: z.boolean().default(false)
+  mustChangePassword: z.boolean().default(false), shiftReminderIntervalMinutes: z.union([z.literal(15), z.literal(30), z.literal(45), z.literal(60)]).optional()
 });
 export type AuthUser = z.infer<typeof AuthUserSchema>;
 export const AuthSessionSchema = z.object({ accessToken: z.string(), user: AuthUserSchema });
@@ -43,7 +43,7 @@ export const OcrResultSchema = z.object({
 export type OcrResult = z.infer<typeof OcrResultSchema>;
 
 export const NotificationSchema = z.object({
-  id: z.string(), type: z.enum(["OCR_LOW_CONFIDENCE", "NEGATIVE_SHIFT"]), title: z.string(), message: z.string(),
+  id: z.string(), type: z.enum(["OCR_LOW_CONFIDENCE", "NEGATIVE_SHIFT", "SHIFT_OPEN_REMINDER", "MIDNIGHT_SHIFT_WARNING"]), title: z.string(), message: z.string(),
   sourceType: z.string(), sourceId: z.string(), metadata: z.unknown().nullable().optional(), readAt: z.string().nullable(), createdAt: z.string()
 });
 export type NotificationDto = z.infer<typeof NotificationSchema>;
@@ -82,6 +82,7 @@ export const ShiftSchema = z.object({
   startEvidence: EvidenceSchema.nullable().optional(), endEvidence: EvidenceSchema.nullable().optional(),
   startValueFormatted: z.string(), endValueFormatted: z.string().nullable(), grossAmountFormatted: z.string().nullable(),
   payoutAmountFormatted: z.string().nullable(), negativeJustification: z.string().nullable(), notes: z.string().nullable(),
+  chatterVerifiedAt: z.string().nullable().optional(), reviewRevision: z.number().int().positive().optional(),
   earnings: z.object({ amountFormatted: z.string(), status: z.enum(["PENDING", "PAID"]), paidAt: z.string().nullable() }).nullable().optional()
 });
 export type ShiftDto = z.infer<typeof ShiftSchema>;
@@ -89,9 +90,31 @@ export type ShiftDto = z.infer<typeof ShiftSchema>;
 export const PaymentRecordSchema = z.object({
   id: z.string(), chatter: z.object({ id: z.string(), displayName: z.string() }).optional(),
   manager: z.object({ id: z.string(), displayName: z.string() }), totalCents: z.number(),
-  totalFormatted: z.string(), paidAt: z.string()
+  totalFormatted: z.string(), paidAt: z.string(),
+  receipt: z.object({ id: z.string(), originalName: z.string(), mimeType: z.string(), sizeBytes: z.number() }).nullable().optional()
 });
 export type PaymentRecordDto = z.infer<typeof PaymentRecordSchema>;
+
+export const ReconciliationStatusSchema = z.enum(["MATCHED", "MISMATCH", "OUT_OF_RANGE", "AMBIGUOUS", "OVERRIDDEN"]);
+export const ShiftReconciliationSchema = z.object({
+  id: z.string(), shiftId: z.string(), shiftReviewRevision: z.number().int().positive(),
+  statementCommissionCents: z.number(), reportedGrossCents: z.number(), deltaCents: z.number(),
+  matchedRowCount: z.number().int().nonnegative(), status: ReconciliationStatusSchema,
+  overrideReason: z.string().nullable(), overriddenAt: z.string().nullable()
+});
+export type ShiftReconciliationDto = z.infer<typeof ShiftReconciliationSchema>;
+
+export const WorksheetCellSchema = z.object({
+  rowIndex: z.number().int().min(0).max(19), columnIndex: z.number().int().min(0).max(5),
+  value: z.string().max(2000), valueType: z.enum(["TEXT", "NUMBER"]), version: z.number().int().positive(),
+  updatedAt: z.string(), updatedBy: z.object({ id: z.string(), displayName: z.string() })
+});
+export type WorksheetCellDto = z.infer<typeof WorksheetCellSchema>;
+export const WorksheetSchema = z.object({
+  id: z.string(), modelTagId: z.string(), rowCount: z.number().int().min(1).max(20),
+  columnCount: z.number().int().min(1).max(6), revision: z.number().int().nonnegative(), cells: z.array(WorksheetCellSchema)
+});
+export type WorksheetDto = z.infer<typeof WorksheetSchema>;
 
 export const AuditLogSchema = z.object({
   id: z.string(), action: z.string(), targetType: z.string(), targetId: z.string().nullable(),

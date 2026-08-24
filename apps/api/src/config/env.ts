@@ -36,7 +36,8 @@ const envSchema = z.object({
   S3_BUCKET: z.string().optional(),
   S3_ACCESS_KEY_ID: z.string().optional(),
   S3_SECRET_ACCESS_KEY: z.string().optional(),
-  STORAGE_DELETE_INTERVAL_MS: z.coerce.number().int().min(10_000).default(60_000)
+  STORAGE_DELETE_INTERVAL_MS: z.coerce.number().int().min(10_000).default(60_000),
+  REMINDER_SCAN_INTERVAL_MS: z.coerce.number().int().min(10_000).default(15_000)
 }).superRefine((value, context) => {
   if (value.COOKIE_SAME_SITE === "none" && value.NODE_ENV !== "production" && !value.COOKIE_SECURE) {
     context.addIssue({

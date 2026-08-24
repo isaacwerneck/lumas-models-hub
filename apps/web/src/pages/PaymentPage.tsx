@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BadgeCheck, Check, CircleAlert, Eye, Pencil, Trash2, Undo2 } from "lucide-react";
 import { Navigate, useSearchParams } from "react-router-dom";
 import type { Pagination } from "@lumas/contracts";
 import { useAuth } from "../auth/AuthContext";
@@ -8,6 +9,8 @@ import { useToast } from "../components/Toast";
 import { getApiErrorMessage } from "../lib/apiError";
 import { ModalDialog } from "../components/ModalDialog";
 import { formatDateTime } from "../lib/dateTime";
+import { EvidenceLink } from "../components/EvidenceLink";
+import type { EvidenceSummary } from "../types/api";
 
 type PaymentSummary = {
   pendingCents: number;
@@ -31,6 +34,10 @@ type ReviewShift = {
   payoutAmountFormatted: string | null;
   negativeJustification: string | null;
   notes: string | null;
+  chatterVerifiedAt: string | null;
+  startEvidence?: EvidenceSummary | null;
+  endEvidence?: EvidenceSummary | null;
+  reconciliation?: { status: "MATCHED" | "MISMATCH" | "OUT_OF_RANGE" | "AMBIGUOUS" | "OVERRIDDEN"; deltaCents: number } | null;
 };
 
 type ReviewData = {
@@ -43,6 +50,18 @@ type PaymentRecord = {
   totalFormatted: string;
   paidAt: string;
   manager: { id: string; displayName: string };
+  receipt?: { id: string; originalName: string } | null;
+};
+
+const PaymentReceiptLink = ({ receipt }: { receipt: { id: string; originalName: string } }) => {
+  const toast = useToast();
+  const open = async () => {
+    try {
+      const response = await api.get(`/payment-receipts/${receipt.id}/content`, { responseType: "blob" });
+      const url = URL.createObjectURL(response.data); window.open(url, "_blank", "noopener,noreferrer"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) { toast.error(getApiErrorMessage(error, "Não foi possível abrir o comprovante de pagamento.")); }
+  };
+  return <button type="button" className="evidence-link" onClick={() => void open()}><Eye size={15} /> {receipt.originalName}</button>;
 };
 
 const formatCentsToBrl = (cents: number | null) => {
@@ -115,7 +134,7 @@ export const PaymentPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [paymentPagination, setPaymentPagination] = useState<Pagination>({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
-  const [shiftPagination, setShiftPagination] = useState<Pagination>({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
+  const [shiftPagination, setShiftPagination] = useState<Pagination>({ page: 1, pageSize: 10, total: 0, totalPages: 1 });
 
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
@@ -133,7 +152,7 @@ export const PaymentPage = () => {
     const [summaryResponse, historyResponse, shiftsResponse] = await Promise.all([
       api.get("/chatter/payment/summary"),
       api.get("/chatter/payment/history", { params: { page: paymentPage, pageSize: 20 } }),
-      api.get("/chatter/shifts/history", { params: { page: shiftPage, pageSize: 20 } })
+      api.get("/chatter/payment/review", { params: { page: shiftPage, pageSize: 10 } })
     ]);
 
     setSummary(summaryResponse.data);
@@ -236,6 +255,17 @@ export const PaymentPage = () => {
     }
   };
 
+  const toggleVerified = async (shift: ReviewShift) => {
+    try {
+      if (shift.chatterVerifiedAt) await api.delete(`/chatter/shifts/${shift.id}/verify`);
+      else await api.post(`/chatter/shifts/${shift.id}/verify`);
+      await loadChatterData();
+      toast.success(shift.chatterVerifiedAt ? "Confirmação desfeita. Você pode editar o horário novamente." : "Horário confirmado e liberado para conferência do gerente.");
+    } catch (requestError: unknown) {
+      toast.error(getApiErrorMessage(requestError, "Não foi possível alterar a confirmação."));
+    }
+  };
+
   if (user?.role === "MANAGER") {
     return <Navigate to="/pagamentos" replace />;
   }
@@ -245,7 +275,7 @@ export const PaymentPage = () => {
       <div className="page-header">
         <div>
           <h1>Pagamento</h1>
-          <p>Consulte seus ganhos e pagamentos</p>
+          <p>Revise cada horário e confirme somente quando valores e capturas estiverem corretos.</p>
         </div>
       </div>
       {loading ? <div className="card skeleton-grid" aria-label="Carregando pagamentos"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div> : <div className="card kpi-grid">
@@ -275,6 +305,7 @@ export const PaymentPage = () => {
               <th>Data</th>
               <th>Valor pago</th>
               <th>Gerente</th>
+              <th>Comprovante</th>
             </tr>
           </thead>
           <tbody>
@@ -283,6 +314,7 @@ export const PaymentPage = () => {
                 <td>{formatDateTime(record.paidAt)}</td>
                 <td>{record.totalFormatted}</td>
                 <td>{record.manager.displayName}</td>
+                <td>{record.receipt ? <PaymentReceiptLink receipt={record.receipt} /> : "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -291,52 +323,58 @@ export const PaymentPage = () => {
         {paymentPagination.totalPages > 1 ? <div className="pagination"><button className="secondary-button" disabled={paymentPagination.page <= 1} onClick={() => changePage("paymentPage", paymentPage - 1)}>Anterior</button><span>Página {paymentPagination.page} de {paymentPagination.totalPages}</span><button className="secondary-button" disabled={paymentPagination.page >= paymentPagination.totalPages} onClick={() => changePage("paymentPage", paymentPage + 1)}>Próxima</button></div> : null}
       </div>
 
-      <div className="card table-card" tabIndex={0} aria-label="Lançamentos">
+      <div className="card review-list-card" tabIndex={0} aria-label="Lançamentos">
         <h2>Lancamentos</h2>
-        {!loading ? <table>
-          <thead>
-            <tr>
-              <th>Modelo</th>
-              <th>Inicio</th>
-              <th>Fim</th>
-              <th>Bruto</th>
-              <th>Comissao</th>
-              <th>MPH</th>
-              <th>Acoes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(review?.shifts ?? []).map((shift) => (
-              <tr key={shift.id}>
-                <td>{shift.modelTag.name}</td>
-                <td>{formatDateTime(shift.startedAt)}</td>
-                <td>{shift.endedAt ? formatDateTime(shift.endedAt) : "-"}</td>
-                <td>{shift.grossAmountFormatted ?? "-"}</td>
-                <td>{shift.payoutAmountFormatted ?? "-"}</td>
-                <td>{shiftMph(shift) ?? "-"}</td>
-                <td className="actions-cell">
-                  <button className="secondary-button" onClick={() => openShiftEditor(shift)}>
-                    Editar
-                  </button>
-                  <button
-                    className="secondary-button"
-                    onClick={() => setDeleteTargetShiftId(shift.id)}
-                    disabled={deletingShiftId === shift.id}
-                  >
-                    {deletingShiftId === shift.id ? "Apagando..." : "Apagar"}
-                  </button>
-                </td>
-              </tr>
+        {!loading ? <div className="review-list">
+          {(review?.shifts ?? []).map((shift) => (
+            <article className="review-card" key={shift.id}>
+              <header className="review-card-header">
+                <div><span className="review-card-eyebrow">Modelo</span><strong>{shift.modelTag.name}</strong></div>
+                <div className="review-status-cell">
+                  <span className={`review-status ${shift.chatterVerifiedAt ? "is-confirmed" : "is-pending"}`}>
+                    {shift.chatterVerifiedAt ? <BadgeCheck size={16} /> : <CircleAlert size={16} />}
+                    {shift.chatterVerifiedAt ? "Confirmado" : "Revisão pendente"}
+                  </span>
+                </div>
+              </header>
+              <div className="review-card-main">
+                <div className="review-time-grid">
+                  <div><span>Início</span><strong>{formatDateTime(shift.startedAt)}</strong></div>
+                  <div><span>Fim</span><strong>{shift.endedAt ? formatDateTime(shift.endedAt) : "—"}</strong></div>
+                </div>
+                <div className="review-metric-grid">
+                  <div><span>Bruto</span><strong>{shift.grossAmountFormatted ?? "—"}</strong></div>
+                  <div><span>Comissão</span><strong>{shift.payoutAmountFormatted ?? "—"}</strong></div>
+                  <div><span>MPH</span><strong>{shiftMph(shift) ?? "—"}</strong></div>
+                </div>
+                <div className="review-captures"><span>Capturas</span><div className="evidence-pair"><EvidenceLink evidence={shift.startEvidence} /><EvidenceLink evidence={shift.endEvidence} /></div></div>
+              </div>
+              <footer className="review-card-footer">
+                <span>{shift.chatterVerifiedAt ? "Você pode reabrir a revisão se precisar corrigir este lançamento." : "Confira dados e capturas antes de confirmar."}</span>
+                <div className="review-actions-cell">
+                  <div className="review-actions">
+                    <button type="button" className={shift.chatterVerifiedAt ? "review-reopen-button" : "review-confirm-button"} onClick={() => void toggleVerified(shift)}>
+                      {shift.chatterVerifiedAt ? <Undo2 size={15} /> : <Check size={16} />}
+                      {shift.chatterVerifiedAt ? "Reabrir" : "Confirmar"}
+                    </button>
+                    {!shift.chatterVerifiedAt ? <>
+                      <button type="button" className="review-icon-button" onClick={() => openShiftEditor(shift)} aria-label={`Editar horário de ${shift.modelTag.name}`} title="Editar horário"><Pencil size={16} /></button>
+                      <button type="button" className="review-icon-button is-danger" onClick={() => setDeleteTargetShiftId(shift.id)} disabled={deletingShiftId === shift.id} aria-label={`Apagar horário de ${shift.modelTag.name}`} title="Apagar horário"><Trash2 size={16} /></button>
+                    </> : null}
+                  </div>
+                </div>
+              </footer>
+            </article>
             ))}
-          </tbody>
-        </table> : <div className="skeleton-list"><div className="skeleton" /><div className="skeleton" /></div>}
+        </div> : <div className="skeleton-list"><div className="skeleton" /><div className="skeleton" /></div>}
         {!loading && (review?.shifts.length ?? 0) === 0 ? <p className="empty-hint">Nenhum turno fechado para revisar.</p> : null}
         {shiftPagination.totalPages > 1 ? <div className="pagination"><button className="secondary-button" disabled={shiftPagination.page <= 1} onClick={() => changePage("shiftPage", shiftPage - 1)}>Anterior</button><span>Página {shiftPagination.page} de {shiftPagination.totalPages}</span><button className="secondary-button" disabled={shiftPagination.page >= shiftPagination.totalPages} onClick={() => changePage("shiftPage", shiftPage + 1)}>Próxima</button></div> : null}
       </div>
 
-      {editingShiftId ? (
-        <div className="card form-grid">
+      <ModalDialog open={Boolean(editingShiftId)} onClose={() => !savingEdit && setEditingShiftId(null)} ariaLabel="Editar lançamento" panelClassName="shift-edit-modal">
+        {editingShiftId ? <div className="form-grid">
           <h2>Editar lancamento</h2>
+          <p className="modal-intro">Altere os dados necessários e salve. O lançamento voltará para revisão.</p>
 
           <label>
             Inicio
@@ -383,16 +421,17 @@ export const PaymentPage = () => {
             <small className="field-hint">{editNotes.length}/500</small>
           </label>
 
-          <div className="actions-cell">
+          <div className="modal-actions">
             <button className="primary-button" type="button" onClick={() => void saveShiftEdit()} disabled={savingEdit}>
               {savingEdit ? "Salvando..." : "Salvar alteracoes"}
             </button>
-            <button className="secondary-button" type="button" onClick={() => setEditingShiftId(null)}>
+            <button className="secondary-button" type="button" onClick={() => setEditingShiftId(null)} disabled={savingEdit}>
               Cancelar
             </button>
           </div>
         </div>
-      ) : null}
+        : null}
+      </ModalDialog>
 
       <ModalDialog open={Boolean(deleteTargetShiftId)} onClose={() => setDeleteTargetShiftId(null)} ariaLabel="Excluir lançamento">
         {deleteTargetShiftId ? <>

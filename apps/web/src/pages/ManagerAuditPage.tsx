@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { Eye } from "lucide-react";
 import type { AuditLogDto, Pagination } from "@lumas/contracts";
 import { api } from "../lib/api";
 import { getApiErrorMessage } from "../lib/apiError";
@@ -69,7 +70,7 @@ export const ManagerAuditPage = () => {
     </div>
     <div className="card table-card" tabIndex={0} aria-label="Registros de auditoria">
       {loading ? <div className="skeleton-list"><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></div> : null}
-      {!loading ? <table><thead><tr><th>Data</th><th>Ação</th><th>Responsável</th><th>Área</th><th></th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</td><td><span className="status-badge">{actionLabels[item.action] ?? item.action}</span></td><td>{item.actor?.displayName ?? "Sistema"}</td><td>{item.targetType}</td><td><button type="button" className="secondary-button" onClick={() => setSelected(item)}>Ver detalhes</button></td></tr>)}</tbody></table> : null}
+      {!loading ? <table><thead><tr><th>Data</th><th>Ação</th><th>Responsável</th><th>Área</th><th><span className="visually-hidden">Ações</span></th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td>{new Date(item.createdAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</td><td><span className="status-badge">{actionLabels[item.action] ?? item.action}</span></td><td>{item.actor?.displayName ?? "Sistema"}</td><td>{item.targetType}</td><td className="audit-actions-cell"><button type="button" className="audit-details-button" onClick={() => setSelected(item)} aria-label={`Ver detalhes de ${actionLabels[item.action] ?? item.action}`}><Eye size={15} aria-hidden="true" /><span>Ver detalhes</span></button></td></tr>)}</tbody></table> : null}
       {!loading && items.length === 0 ? <p className="empty-hint">Nenhum evento encontrado com este filtro.</p> : null}
       {pagination.totalPages > 1 ? <div className="pagination"><button className="secondary-button" disabled={page <= 1} onClick={() => navigate({ page: page - 1 })}>Anterior</button><span>Página {page} de {pagination.totalPages}</span><button className="secondary-button" disabled={page >= pagination.totalPages} onClick={() => navigate({ page: page + 1 })}>Próxima</button></div> : null}
     </div>{error ? <div className="error-box">{error}</div> : null}

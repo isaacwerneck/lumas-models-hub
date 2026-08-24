@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { SessionStatusScreen } from "../components/SessionStatusScreen";
+import { getLastVisitedRoute } from "../lib/lastVisitedRoute";
 
 export const LoginPage = () => {
   const { user, status, login } = useAuth();
@@ -40,7 +41,7 @@ export const LoginPage = () => {
   }
 
   if (status === "authenticated" && user) {
-    return <Navigate to="/home" replace />;
+    return <Navigate to={getLastVisitedRoute(user)} replace />;
   }
 
   const onSubmit = async (event: FormEvent) => {
@@ -49,8 +50,8 @@ export const LoginPage = () => {
     setLoading(true);
 
     try {
-      await login(username.trim().toLowerCase(), password);
-      navigate("/home", { replace: true });
+      const authenticatedUser = await login(username.trim().toLowerCase(), password);
+      navigate(getLastVisitedRoute(authenticatedUser), { replace: true });
     } catch {
       setError("Credenciais inválidas.");
     } finally {
