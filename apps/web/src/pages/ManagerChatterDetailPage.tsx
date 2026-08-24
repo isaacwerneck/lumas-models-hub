@@ -42,6 +42,7 @@ type ChatterDetail = {
   username: string;
   displayName: string;
   isActive: boolean;
+  payoutPercentage: number;
   modelTags: Tag[];
 };
 
@@ -59,6 +60,8 @@ export const ManagerChatterDetailPage = () => {
   const [savingNotesId, setSavingNotesId] = useState<string | null>(null);
   const [resetPassword, setResetPassword] = useState<string | null>(null);
   const [resettingPassword, setResettingPassword] = useState(false);
+  const [payoutDraft, setPayoutDraft] = useState("20");
+  const [savingPayout, setSavingPayout] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -79,6 +82,7 @@ export const ManagerChatterDetailPage = () => {
     setShiftPagination(shiftsResponse.data.pagination);
     setAllTags(tagsResponse.data.tags);
     setSelectedTags(data.modelTags.map((tag: Tag) => tag.id));
+    setPayoutDraft(String(data.payoutPercentage ?? 20));
   };
 
   useEffect(() => {
@@ -140,11 +144,36 @@ export const ManagerChatterDetailPage = () => {
     }
   };
 
+  const savePayout = async () => {
+    if (!chatterId) return;
+    const payoutPercentage = Number(payoutDraft);
+    if (!Number.isInteger(payoutPercentage) || payoutPercentage < 1 || payoutPercentage > 100) {
+      toast.error("Informe uma porcentagem inteira entre 1% e 100%.");
+      return;
+    }
+
+    setSavingPayout(true);
+    try {
+      const response = await api.patch(`/manager/users/${chatterId}`, { payoutPercentage });
+      const savedPercentage = response.data.user.payoutPercentage as number;
+      setChatter((current) => current ? { ...current, payoutPercentage: savedPercentage } : current);
+      setPayoutDraft(String(savedPercentage));
+      toast.success("Payout atualizado com sucesso.");
+    } catch (requestError: unknown) {
+      toast.error(getApiErrorMessage(requestError, "Não foi possível atualizar o payout."));
+    } finally {
+      setSavingPayout(false);
+    }
+  };
+
   const totalPages = shiftPagination.totalPages;
   const safePage = shiftPagination.page;
   const pageShifts = shifts;
   const savedTagIds = chatter?.modelTags.map((tag) => tag.id) ?? [];
   const tagsDirty = selectedTags.length !== savedTagIds.length || selectedTags.some((id) => !savedTagIds.includes(id));
+  const payoutValue = Number(payoutDraft);
+  const payoutValid = Number.isInteger(payoutValue) && payoutValue >= 1 && payoutValue <= 100;
+  const payoutDirty = payoutValid && payoutValue !== chatter?.payoutPercentage;
 
   if (!chatter) {
     return (
@@ -182,6 +211,37 @@ export const ManagerChatterDetailPage = () => {
       <ModalDialog open={Boolean(resetPassword)} onClose={() => setResetPassword(null)} ariaLabel="Redefinir senha">
         {resetPassword ? <><h2>Redefinir senha</h2><p>O chatter será desconectado em todos os dispositivos e precisará trocar esta senha no próximo acesso.</p><label>Senha temporária<input value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} minLength={8} autoComplete="new-password" /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setResetPassword(null)} disabled={resettingPassword}>Cancelar</button><button className="primary-button" onClick={() => void submitPasswordReset()} disabled={resettingPassword || resetPassword.length < 8}>{resettingPassword ? "Redefinindo…" : "Redefinir e encerrar sessões"}</button></div></> : null}
       </ModalDialog>
+
+      <form className="card form-grid payout-settings-card" onSubmit={(event) => { event.preventDefault(); void savePayout(); }}>
+        <div>
+          <h2>Configuração de payout</h2>
+          <p className="field-hint">Define a porcentagem recebida por este chatter nos próximos cálculos.</p>
+        </div>
+        <label htmlFor="chatter-payout-percentage">
+          Porcentagem do chatter
+          <div className="percentage-field">
+            <input
+              id="chatter-payout-percentage"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={100}
+              step={1}
+              required
+              value={payoutDraft}
+              onChange={(event) => setPayoutDraft(event.target.value)}
+              aria-describedby="payout-change-hint"
+            />
+            <span aria-hidden="true">%</span>
+          </div>
+        </label>
+        <small id="payout-change-hint" className="field-hint">
+          Turnos já calculados permanecem inalterados. A nova taxa será usada ao fechar ou recalcular um turno.
+        </small>
+        <button className="primary-button" type="submit" disabled={!payoutDirty || savingPayout}>
+          {savingPayout ? "Salvando…" : "Salvar payout"}
+        </button>
+      </form>
 
       <div className="card form-grid">
         <div className="chatter-tag-header">

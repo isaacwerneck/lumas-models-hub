@@ -6,6 +6,7 @@ import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pa
 import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
 import { getMonthRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
+import { calculatePayoutCents } from "../../utils/payout";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { queueEvidencePurge } from "../../services/evidence-cleanup";
 
@@ -318,7 +319,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
             id: true,
             name: true
           }
-        }
+        },
+        chatter: { select: { payoutPercentage: true } }
       }
     });
 
@@ -354,7 +356,14 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const grossAmountCents = endValueCents - startValueCents;
-    const payoutAmountCents = Math.trunc(grossAmountCents / env.COMMISSION_DIVISOR);
+    const recalculatesPayout = body.startValue !== undefined || body.endValue !== undefined;
+    const payoutPercentage = recalculatesPayout
+      ? shift.chatter.payoutPercentage
+      : shift.payoutPercentage
+        ?? (shift.commissionDivisor ? Math.trunc(100 / shift.commissionDivisor) : shift.chatter.payoutPercentage);
+    const payoutAmountCents = recalculatesPayout
+      ? calculatePayoutCents(grossAmountCents, payoutPercentage)
+      : shift.payoutAmountCents ?? calculatePayoutCents(grossAmountCents, payoutPercentage);
     const negativeJustification = body.negativeJustification ?? shift.negativeJustification ?? null;
 
     if (grossAmountCents < 0 && !(negativeJustification && negativeJustification.trim().length > 0)) {
@@ -376,7 +385,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           startValueConfirmedAt: new Date(),
           endValueConfirmedAt: new Date(),
           grossAmountCents,
-          commissionDivisor: env.COMMISSION_DIVISOR,
+          commissionDivisor: recalculatesPayout ? null : shift.commissionDivisor,
+          payoutPercentage,
           payoutAmountCents,
           negativeJustification: grossAmountCents < 0 ? negativeJustification?.trim() ?? null : null,
           notes: body.notes !== undefined ? (body.notes.trim() === "" ? null : body.notes.trim()) : shift.notes,
@@ -402,7 +412,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           action: AuditAction.SHIFT_UPDATED,
           targetType: "Shift",
           targetId: shift.id,
-          metadata: { fields: Object.keys(body), grossAmountCents, payoutAmountCents, ...auditRequestMetadata(request) }
+          metadata: { fields: Object.keys(body), grossAmountCents, payoutPercentage, payoutAmountCents, ...auditRequestMetadata(request) }
         }
       });
 
@@ -652,7 +662,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         id: params.shiftId,
         chatterId: authUser.sub,
         status: ShiftStatus.OPEN
-      }
+      },
+      include: { chatter: { select: { payoutPercentage: true } } }
     });
 
     if (!shift) {
@@ -693,7 +704,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const grossAmountCents = endValueCents - shift.startValueCents;
-    const payoutAmountCents = Math.trunc(grossAmountCents / env.COMMISSION_DIVISOR);
+    const payoutPercentage = shift.chatter.payoutPercentage;
+    const payoutAmountCents = calculatePayoutCents(grossAmountCents, payoutPercentage);
 
     if (grossAmountCents < 0 && !(body.negativeJustification && body.negativeJustification.trim().length > 0)) {
       return reply.code(400).send({
@@ -729,7 +741,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           endValueCents,
           endValueConfirmedAt: body.manualConfirmedValue ? endedAt : null,
           grossAmountCents,
-          commissionDivisor: env.COMMISSION_DIVISOR,
+          commissionDivisor: null,
+          payoutPercentage,
           payoutAmountCents,
           negativeJustification: grossAmountCents < 0 ? body.negativeJustification?.trim() : null,
           endOriginalCurrency: body.moneyMetadata?.currency ?? "BRL",
@@ -748,7 +761,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         targetType: "Shift",
         targetId: shift.id,
         metadata: {
-          modelTagId: shift.modelTagId, grossAmountCents, payoutAmountCents,
+          modelTagId: shift.modelTagId, grossAmountCents, payoutPercentage, payoutAmountCents,
           ...auditRequestMetadata(request)
         }
       } });

@@ -97,6 +97,7 @@ model User {
   lockedUntil         DateTime?
   authVersion         Int               @default(0)
   mustChangePassword  Boolean           @default(false)
+  payoutPercentage    Int               @default(20)
   shiftReminderIntervalMinutes Int      @default(60)
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
@@ -180,6 +181,7 @@ model Shift {
 
   grossAmountCents     Int?
   commissionDivisor    Int?
+  payoutPercentage     Int?
   payoutAmountCents    Int?
   negativeJustification String?
   notes                String?

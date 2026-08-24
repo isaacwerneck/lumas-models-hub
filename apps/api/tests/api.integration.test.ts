@@ -1,7 +1,7 @@
 import bcrypt from "bcrypt";
 import ExcelJS from "exceljs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { NotificationType, Role } from "@prisma/client";
+import { AuditAction, NotificationType, Role } from "@prisma/client";
 import { buildApp } from "../src/app";
 import { buildRefreshToken, tokenHash } from "../src/modules/auth/auth.service";
 import { env } from "../src/config/env";
@@ -262,6 +262,7 @@ describe("gerência de chatters e tags", () => {
     const r = await app.inject({ method: "POST", url: "/api/v1/manager/users", headers: auth(managerToken), payload: { username: "NEW.CHATTER", displayName: " New Chatter ", role: "CHATTER", password: "Password@123" } });
     expect(r.statusCode).toBe(201);
     expect(json(r).user.username).toBe("new.chatter");
+    expect(json(r).user.payoutPercentage).toBe(20);
     createdChatterId = json(r).user.id;
   });
   it("rejeita chatter duplicado", async () => { const r = await app.inject({ method: "POST", url: "/api/v1/manager/users", headers: auth(managerToken), payload: { username: "new.chatter", displayName: "New Chatter", role: "CHATTER", password: "Password@123" } }); expect(r.statusCode).toBe(409); });
@@ -284,6 +285,30 @@ describe("gerência de chatters e tags", () => {
     otherToken = app.jwt.sign({ sub: otherChatterId, role: Role.CHATTER, username: reactivated.username, authVersion: reactivated.authVersion });
   });
   it("aceita PATCH vazio como no-op legado", async () => { const r = await app.inject({ method: "PATCH", url: `/manager/users/${otherChatterId}`, headers: auth(managerToken), payload: {} }); expect(r.statusCode).toBe(200); });
+  it("permite ao gerente configurar e audita o payout inteiro do chatter", async () => {
+    const r = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(managerToken), payload: { payoutPercentage: 35 } });
+    expect(r.statusCode).toBe(200);
+    expect(json(r).user.payoutPercentage).toBe(35);
+    const updated = await app.prisma.user.findUniqueOrThrow({ where: { id: createdChatterId } });
+    expect(updated.payoutPercentage).toBe(35);
+    const audit = await app.prisma.auditLog.findFirstOrThrow({
+      where: { actorId: managerId, targetId: createdChatterId, action: AuditAction.USER_UPDATED },
+      orderBy: { createdAt: "desc" }
+    });
+    expect(audit.metadata).toMatchObject({
+      changes: { payoutPercentage: { before: 20, after: 35 } }
+    });
+  });
+  it.each([0, 101, 20.5])("rejeita payout inválido (%s)", async (payoutPercentage) => {
+    const r = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(managerToken), payload: { payoutPercentage } });
+    expect(r.statusCode).toBe(400);
+  });
+  it("rejeita payout para gerente e alteração feita por chatter", async () => {
+    const managerTarget = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${managerId}`, headers: auth(managerToken), payload: { payoutPercentage: 20 } });
+    const chatterActor = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(chatterToken), payload: { payoutPercentage: 20 } });
+    expect(managerTarget.statusCode).toBe(400);
+    expect(chatterActor.statusCode).toBe(403);
+  });
   it("lista tags", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/manager/tags", headers: auth(managerToken) }); expect(r.statusCode).toBe(200); expect(json(r).tags.length).toBeGreaterThan(0); });
   it("cria tag auditada", async () => { const r = await app.inject({ method: "POST", url: "/api/v1/manager/tags", headers: auth(managerToken), payload: { name: "Disposable Tag" } }); expect(r.statusCode).toBe(201); createdTagId = json(r).tag.id; });
   it("rejeita tag duplicada", async () => { const r = await app.inject({ method: "POST", url: "/api/v1/manager/tags", headers: auth(managerToken), payload: { name: "Disposable Tag" } }); expect(r.statusCode).toBe(409); });
@@ -296,6 +321,7 @@ describe("gerência de chatters e tags", () => {
     const shifts = await app.inject({ method: "GET", url: `/api/v1/manager/chatters/${chatterId}/shifts?page=1&pageSize=10&modelTagId=${tagId}`, headers: auth(managerToken) });
     const payments = await app.inject({ method: "GET", url: `/api/v1/manager/chatters/${chatterId}/payments?page=1&pageSize=10`, headers: auth(managerToken) });
     expect(json(detail).chatter.id).toBe(chatterId);
+    expect(json(detail).chatter.payoutPercentage).toBe(20);
     expect(json(shifts).pagination.pageSize).toBe(10);
     expect(json(payments).pagination.pageSize).toBe(10);
   });
@@ -342,7 +368,45 @@ describe("turnos", () => {
   it("rejeita segundo turno aberto", async () => { const evidence = await createTestEvidence(chatterId, "inicio-duplicado.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(409); });
   it("retorna turno atual", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) }); expect(json(r).shift.id).toBe(openShiftId); });
   it("rejeita encerramento sem imagem", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: {} }); expect(r.statusCode).toBe(400); });
-  it("encerra turno positivo", async () => { const evidence = await createTestEvidence(chatterId, "fim.webp"); const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: { endEvidenceId: evidence.id, manualConfirmedValue: "R$ 140,00" } }); expect(r.statusCode).toBe(200); });
+  it("encerra turno positivo com o payout padrão de 20%", async () => {
+    const evidence = await createTestEvidence(chatterId, "fim.webp");
+    const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: { endEvidenceId: evidence.id, manualConfirmedValue: "R$ 140,00" } });
+    const shift = await app.prisma.shift.findUniqueOrThrow({ where: { id: openShiftId } });
+    expect(r.statusCode).toBe(200);
+    expect(shift.payoutPercentage).toBe(20);
+    expect(shift.payoutAmountCents).toBe(800);
+  });
+  it("preserva o snapshot e usa a nova taxa apenas ao recalcular valores", async () => {
+    const shift = await app.prisma.shift.create({ data: {
+      chatterId: otherChatterId,
+      modelTagId: otherTagId,
+      status: "CLOSED",
+      startedAt: new Date("2026-08-20T12:00:00.000Z"),
+      endedAt: new Date("2026-08-20T14:00:00.000Z"),
+      startValueCents: 0,
+      endValueCents: 10_000,
+      grossAmountCents: 10_000,
+      payoutPercentage: 20,
+      payoutAmountCents: 2_000
+    } });
+    await app.prisma.earnings.create({ data: { shiftId: shift.id, chatterId: otherChatterId, amountCents: 2_000 } });
+    await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${otherChatterId}`, headers: auth(managerToken), payload: { payoutPercentage: 35 } });
+
+    await app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${shift.id}`, headers: auth(otherToken), payload: { notes: "Sem recálculo financeiro" } });
+    const preserved = await app.prisma.shift.findUniqueOrThrow({ where: { id: shift.id } });
+    expect(preserved.payoutPercentage).toBe(20);
+    expect(preserved.payoutAmountCents).toBe(2_000);
+
+    await app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${shift.id}`, headers: auth(otherToken), payload: { endValue: "R$ 200,00" } });
+    const recalculated = await app.prisma.shift.findUniqueOrThrow({ where: { id: shift.id } });
+    const earnings = await app.prisma.earnings.findUniqueOrThrow({ where: { shiftId: shift.id } });
+    expect(recalculated.payoutPercentage).toBe(35);
+    expect(recalculated.payoutAmountCents).toBe(7_000);
+    expect(earnings.amountCents).toBe(7_000);
+
+    await app.prisma.shift.delete({ where: { id: shift.id } });
+    await app.prisma.user.update({ where: { id: otherChatterId }, data: { payoutPercentage: 20 } });
+  });
   it("lista histórico paginado", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/history?page=1&pageSize=1", headers: auth(chatterToken) }); expect(r.statusCode).toBe(200); expect(json(r).items).toHaveLength(1); });
   it("rejeita PATCH vazio", async () => { const r = await app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${openShiftId}`, headers: auth(chatterToken), payload: {} }); expect(r.statusCode).toBe(400); });
   it("edita observação do turno", async () => { const r = await app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${openShiftId}`, headers: auth(chatterToken), payload: { notes: "Revisado" } }); expect(r.statusCode).toBe(200); expect(json(r).shift.notes).toBe("Revisado"); });

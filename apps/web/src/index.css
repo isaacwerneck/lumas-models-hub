@@ -2667,6 +2667,11 @@ tbody tr:hover {
 .chatter-tag-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .chatter-tag-header h2 { margin: 0; }
 .chatter-tag-header .secondary-button { min-height: 36px; padding: .4rem .75rem; font-size: .8rem; }
+.payout-settings-card h2 { margin: 0 0 .35rem; }
+.percentage-field { position: relative; max-width: 220px; }
+.percentage-field input { width: 100%; padding-right: 2.5rem; }
+.percentage-field span { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-weight: 800; pointer-events: none; }
+.payout-settings-card .primary-button { width: fit-content; }
 
 .manager-shifts-card .list-toolbar { display: grid; grid-template-columns: minmax(220px, 320px) 1fr auto; align-items: center; }
 .manager-shifts-card .list-count { justify-self: center; }

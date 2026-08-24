@@ -9,6 +9,7 @@ import { auditRequestMetadata } from "../../utils/audit";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../../services/evidence-cleanup";
 import { PAYMENTS_UPDATED_EVENT } from "./manager.events";
 import { businessDateKey, businessDateKeysInclusive } from "../../utils/time";
+import { MAX_PAYOUT_PERCENTAGE, MIN_PAYOUT_PERCENTAGE } from "../../utils/payout";
 
 const ensureManagerRole = (role: Role) => role === Role.MANAGER;
 
@@ -24,7 +25,8 @@ const userUpdateSchema = z.object({
   displayName: z.string().min(2).max(100).optional(),
   role: z.enum([Role.CHATTER, Role.MANAGER]).optional(),
   isActive: z.boolean().optional(),
-  password: z.string().min(8).max(128).optional()
+  password: z.string().min(8).max(128).optional(),
+  payoutPercentage: z.number().int().min(MIN_PAYOUT_PERCENTAGE).max(MAX_PAYOUT_PERCENTAGE).optional()
 });
 
 const userIdParamsSchema = z.object({
@@ -311,7 +313,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const chatter = await fastify.prisma.user.findFirst({
       where: { id: params.userId, role: Role.CHATTER },
       select: {
-        id: true, username: true, displayName: true, isActive: true, createdAt: true,
+        id: true, username: true, displayName: true, isActive: true, payoutPercentage: true, createdAt: true,
         chatterModelTags: { include: { modelTag: { select: { id: true, name: true, isActive: true } } } }
       }
     });
@@ -427,6 +429,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
           displayName: true,
           role: true,
           isActive: true,
+          payoutPercentage: true,
           createdAt: true
         }
       });
@@ -467,10 +470,15 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ message: "Não é permitido desativar o próprio usuário." });
     }
 
+    if (body.payoutPercentage !== undefined && (body.role ?? targetUser.role) !== Role.CHATTER) {
+      return reply.code(400).send({ message: "A porcentagem de payout só pode ser definida para chatters." });
+    }
+
     const data: {
       displayName?: string;
       role?: Role;
       isActive?: boolean;
+      payoutPercentage?: number;
       passwordHash?: string;
       authVersion?: { increment: number };
       mustChangePassword?: boolean;
@@ -484,6 +492,9 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     }
     if (body.isActive !== undefined) {
       data.isActive = body.isActive;
+    }
+    if (body.payoutPercentage !== undefined) {
+      data.payoutPercentage = body.payoutPercentage;
     }
     if (body.password) {
       data.passwordHash = await hashPassword(body.password);
@@ -503,6 +514,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
           displayName: true,
           role: true,
           isActive: true,
+          payoutPercentage: true,
           updatedAt: true
         }
       });
@@ -532,6 +544,9 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
               displayName: body.displayName,
               role: body.role,
               isActive: body.isActive,
+              payoutPercentage: body.payoutPercentage === undefined
+                ? undefined
+                : { before: targetUser.payoutPercentage, after: body.payoutPercentage },
               passwordChanged: Boolean(body.password)
             }
           }
