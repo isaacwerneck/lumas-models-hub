@@ -1,0 +1,4 @@
+# Fallback versionado para o piloto. O build:netlify substitui este arquivo
+# usando API_PROXY_TARGET, mas o Vite também o publica em builds comuns.
+/api/*  https://lumas-models-hub.onrender.com/api/:splat  200
+/*  /index.html  200

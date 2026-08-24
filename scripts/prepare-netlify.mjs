@@ -27,7 +27,7 @@ if (isNetlify && (!apiOrigin || !socketOrigin)) {
 }
 
 const redirects = [
-  ...(apiOrigin ? [`/api/*  ${apiOrigin}/api/:splat  200!`] : []),
+  ...(apiOrigin ? [`/api/*  ${apiOrigin}/api/:splat  200`] : []),
   "/*  /index.html  200"
 ].join("\n");
 
