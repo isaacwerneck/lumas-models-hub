@@ -7,6 +7,7 @@ import { buildRefreshToken, tokenHash } from "../src/modules/auth/auth.service";
 import { env } from "../src/config/env";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../src/services/evidence-cleanup";
 import { createNotifications } from "../src/modules/notifications/notification.service";
+import { businessTimeLabel } from "../src/utils/time";
 
 const app = buildApp();
 let managerId = "";
@@ -285,6 +286,29 @@ describe("gerência de chatters e tags", () => {
     otherToken = app.jwt.sign({ sub: otherChatterId, role: Role.CHATTER, username: reactivated.username, authVersion: reactivated.authVersion });
   });
   it("aceita PATCH vazio como no-op legado", async () => { const r = await app.inject({ method: "PATCH", url: `/manager/users/${otherChatterId}`, headers: auth(managerToken), payload: {} }); expect(r.statusCode).toBe(200); });
+  it("edita o nome com trim e audita os valores anterior e posterior", async () => {
+    const before = await app.prisma.user.findUniqueOrThrow({ where: { id: createdChatterId } });
+    const r = await app.inject({
+      method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(managerToken),
+      payload: { displayName: "  Chatter Renomeado  " }
+    });
+    expect(r.statusCode).toBe(200);
+    expect(json(r).user.displayName).toBe("Chatter Renomeado");
+    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: createdChatterId } });
+    expect(after.username).toBe(before.username);
+    expect(after.authVersion).toBe(before.authVersion);
+    const audit = await app.prisma.auditLog.findFirstOrThrow({
+      where: { actorId: managerId, targetId: createdChatterId, action: AuditAction.USER_UPDATED },
+      orderBy: { createdAt: "desc" }
+    });
+    expect(audit.metadata).toMatchObject({
+      changes: { displayName: { before: before.displayName, after: "Chatter Renomeado" } }
+    });
+  });
+  it("rejeita nome vazio após trim", async () => {
+    const r = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(managerToken), payload: { displayName: "   " } });
+    expect(r.statusCode).toBe(400);
+  });
   it("permite ao gerente configurar e audita o payout inteiro do chatter", async () => {
     const r = await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${createdChatterId}`, headers: auth(managerToken), payload: { payoutPercentage: 35 } });
     expect(r.statusCode).toBe(200);
@@ -364,8 +388,156 @@ describe("turnos", () => {
     await app.prisma.shift.delete({ where: { id: createdId } });
     await app.prisma.evidence.deleteMany({ where: { id: { in: evidences.map((evidence) => evidence.id) } } });
   });
+  it("arquiva chatter sem apagar histórico ou vínculos e bloqueia novas alterações", async () => {
+    const passwordHash = await bcrypt.hash("Password@123", 4);
+    const archived = await app.prisma.user.create({
+      data: { username: `archive.${crypto.randomUUID()}`, displayName: "Chatter Arquivado", passwordHash, role: Role.CHATTER }
+    });
+    const link = await app.prisma.chatterModelTag.create({ data: { chatterId: archived.id, modelTagId: tagId } });
+    const shift = await app.prisma.shift.create({ data: {
+      chatterId: archived.id, modelTagId: tagId, status: "CLOSED",
+      startedAt: new Date("2026-08-01T10:00:00.000Z"), endedAt: new Date("2026-08-01T11:00:00.000Z"),
+      startValueCents: 1000, endValueCents: 1000, grossAmountCents: 0, payoutAmountCents: 0
+    } });
+    const message = await app.prisma.chatMessage.create({
+      data: { modelTagId: tagId, senderId: archived.id, content: "Histórico preservado" }
+    });
+    const session = await app.prisma.refreshSession.create({
+      data: { userId: archived.id, tokenHash: crypto.randomUUID(), expiresAt: new Date(Date.now() + 60_000) }
+    });
+
+    const removed = await app.inject({ method: "DELETE", url: `/api/v1/manager/users/${archived.id}`, headers: auth(managerToken) });
+    expect(removed.statusCode).toBe(200);
+    const stored = await app.prisma.user.findUniqueOrThrow({ where: { id: archived.id } });
+    expect(stored.isActive).toBe(false);
+    expect(stored.deletedAt).not.toBeNull();
+    expect(await app.prisma.chatterModelTag.findUnique({ where: { id: link.id } })).not.toBeNull();
+    expect(await app.prisma.shift.findUnique({ where: { id: shift.id } })).not.toBeNull();
+    expect(await app.prisma.chatMessage.findUnique({ where: { id: message.id } })).not.toBeNull();
+    expect((await app.prisma.refreshSession.findUniqueOrThrow({ where: { id: session.id } })).revokedAt).not.toBeNull();
+
+    const list = await app.inject({ method: "GET", url: `/api/v1/manager/chatters?search=${encodeURIComponent(archived.username)}`, headers: auth(managerToken) });
+    expect(json(list).items).toHaveLength(0);
+    expect((await app.inject({ method: "PATCH", url: `/api/v1/manager/users/${archived.id}`, headers: auth(managerToken), payload: { displayName: "Outro nome" } })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: `/api/v1/manager/users/${archived.id}/reset-password`, headers: auth(managerToken), payload: { password: "Temporary@123" } })).statusCode).toBe(404);
+    expect((await app.inject({ method: "PUT", url: `/api/v1/manager/chatters/${archived.id}/tags`, headers: auth(managerToken), payload: { modelTagIds: [] } })).statusCode).toBe(404);
+  });
+  it("serializa arquivamento com lançamento retroativo que cria ganho pendente", async () => {
+    const passwordHash = await bcrypt.hash("Password@123", 4);
+    const suffix = crypto.randomUUID();
+    const [candidate, model] = await app.prisma.$transaction([
+      app.prisma.user.create({ data: {
+        username: `archive-retro.${suffix}`,
+        displayName: "Corrida Retroativa",
+        passwordHash,
+        role: Role.CHATTER
+      } }),
+      app.prisma.modelTag.create({ data: { name: `Modelo corrida retro ${suffix}` } })
+    ]);
+    await app.prisma.chatterModelTag.create({ data: { chatterId: candidate.id, modelTagId: model.id } });
+    const candidateToken = app.jwt.sign({ sub: candidate.id, role: Role.CHATTER, username: candidate.username, authVersion: 0 });
+    const evidence = await Promise.all([
+      createTestEvidence(candidate.id, "corrida-retro-inicio.webp"),
+      createTestEvidence(candidate.id, "corrida-retro-fim.webp")
+    ]);
+
+    const [removed, retroactive] = await Promise.all([
+      app.inject({ method: "DELETE", url: `/api/v1/manager/users/${candidate.id}`, headers: auth(managerToken) }),
+      app.inject({ method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(candidateToken), payload: {
+        startedAt: "2026-08-01T10:00:00.000Z",
+        endedAt: "2026-08-01T11:00:00.000Z",
+        shifts: [{
+          modelTagId: model.id,
+          start: { evidenceId: evidence[0].id, manualConfirmedValue: "R$ 100,00" },
+          end: { evidenceId: evidence[1].id, manualConfirmedValue: "R$ 150,00" }
+        }]
+      } })
+    ]);
+
+    expect([[200, 401], [200, 403], [409, 201]]).toContainEqual([removed.statusCode, retroactive.statusCode]);
+    const stored = await app.prisma.user.findUniqueOrThrow({ where: { id: candidate.id } });
+    const pending = await app.prisma.earnings.count({ where: { chatterId: candidate.id, status: "PENDING" } });
+    if (stored.deletedAt) {
+      expect(pending).toBe(0);
+    } else {
+      expect(pending).toBeGreaterThan(0);
+    }
+
+    await app.prisma.earnings.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.shift.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.evidence.deleteMany({ where: { uploadedById: candidate.id } });
+    await app.prisma.chatterModelTag.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.auditLog.deleteMany({ where: { OR: [{ actorId: candidate.id }, { targetId: candidate.id }] } });
+    await app.prisma.refreshSession.deleteMany({ where: { userId: candidate.id } });
+    await app.prisma.user.delete({ where: { id: candidate.id } });
+    await app.prisma.modelTag.delete({ where: { id: model.id } });
+  });
+  it("serializa arquivamento com recálculo que recria ganho pendente", async () => {
+    const passwordHash = await bcrypt.hash("Password@123", 4);
+    const suffix = crypto.randomUUID();
+    const [candidate, model] = await app.prisma.$transaction([
+      app.prisma.user.create({ data: {
+        username: `archive-edit.${suffix}`,
+        displayName: "Corrida Recálculo",
+        passwordHash,
+        role: Role.CHATTER
+      } }),
+      app.prisma.modelTag.create({ data: { name: `Modelo corrida edição ${suffix}` } })
+    ]);
+    await app.prisma.chatterModelTag.create({ data: { chatterId: candidate.id, modelTagId: model.id } });
+    const shift = await app.prisma.shift.create({ data: {
+      chatterId: candidate.id,
+      modelTagId: model.id,
+      status: "CLOSED",
+      startedAt: new Date("2026-08-02T10:00:00.000Z"),
+      endedAt: new Date("2026-08-02T11:00:00.000Z"),
+      startValueCents: 10_000,
+      endValueCents: 10_000,
+      grossAmountCents: 0,
+      payoutPercentage: 20,
+      payoutAmountCents: 0
+    } });
+    const candidateToken = app.jwt.sign({ sub: candidate.id, role: Role.CHATTER, username: candidate.username, authVersion: 0 });
+
+    const [removed, recalculated] = await Promise.all([
+      app.inject({ method: "DELETE", url: `/api/v1/manager/users/${candidate.id}`, headers: auth(managerToken) }),
+      app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${shift.id}`, headers: auth(candidateToken), payload: {
+        startValue: "R$ 100,00",
+        endValue: "R$ 150,00"
+      } })
+    ]);
+
+    expect([[200, 409], [200, 401], [409, 200]]).toContainEqual([removed.statusCode, recalculated.statusCode]);
+    const stored = await app.prisma.user.findUniqueOrThrow({ where: { id: candidate.id } });
+    const pending = await app.prisma.earnings.count({ where: { chatterId: candidate.id, status: "PENDING" } });
+    if (stored.deletedAt) {
+      expect(pending).toBe(0);
+    } else {
+      expect(pending).toBeGreaterThan(0);
+    }
+
+    await app.prisma.earnings.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.shift.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.chatterModelTag.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.auditLog.deleteMany({ where: { OR: [{ actorId: candidate.id }, { targetId: candidate.id }] } });
+    await app.prisma.refreshSession.deleteMany({ where: { userId: candidate.id } });
+    await app.prisma.user.delete({ where: { id: candidate.id } });
+    await app.prisma.modelTag.delete({ where: { id: model.id } });
+  });
   it("inicia turno", async () => { const evidence = await createTestEvidence(chatterId, "inicio.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(201); openShiftId = json(r).shift.id; });
-  it("rejeita segundo turno aberto", async () => { const evidence = await createTestEvidence(chatterId, "inicio-duplicado.webp"); const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } }); expect(r.statusCode).toBe(409); });
+  it("persiste a abertura como evento com snapshot do nome", async () => {
+    const shift = await app.prisma.shift.findUniqueOrThrow({ where: { id: openShiftId } });
+    const message = await app.prisma.chatMessage.findFirstOrThrow({
+      where: { senderId: chatterId, modelTagId: tagId, kind: "SHIFT_EVENT" }, orderBy: { createdAt: "desc" }
+    });
+    expect(message.content).toBe(`Chatter Test abriu o ponto às ${businessTimeLabel(shift.startedAt)}h.`);
+  });
+  it("rejeita segundo turno aberto identificando o chatter", async () => {
+    const evidence = await createTestEvidence(chatterId, "inicio-duplicado.webp");
+    const r = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(chatterToken), payload: { modelTagId: tagId, startEvidenceId: evidence.id, manualConfirmedValue: "R$ 100,00", notificationsEnabled: true } });
+    expect(r.statusCode).toBe(409);
+    expect(json(r).error.message).toBe("O chatter Chatter Test está com o ponto aberto no momento.");
+  });
   it("retorna turno atual", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) }); expect(json(r).shift.id).toBe(openShiftId); });
   it("rejeita encerramento sem imagem", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${openShiftId}/end`, headers: auth(chatterToken), payload: {} }); expect(r.statusCode).toBe(400); });
   it("encerra turno positivo com o payout padrão de 20%", async () => {
@@ -375,6 +547,33 @@ describe("turnos", () => {
     expect(r.statusCode).toBe(200);
     expect(shift.payoutPercentage).toBe(20);
     expect(shift.payoutAmountCents).toBe(800);
+    const message = await app.prisma.chatMessage.findFirstOrThrow({
+      where: { senderId: chatterId, modelTagId: tagId, kind: "SHIFT_EVENT", content: { contains: "bateu o ponto" } },
+      orderBy: { createdAt: "desc" }
+    });
+    expect(message.content).toBe(`Chatter Test bateu o ponto às ${businessTimeLabel(shift.endedAt!)}h.`);
+  });
+  it("encerra uma única vez sob requisições concorrentes e cria um único evento", async () => {
+    const startEvidence = await createTestEvidence(otherChatterId, "corrida-fechamento-inicio.webp");
+    const startedAt = new Date("2026-08-26T11:00:00.000Z");
+    const endedAt = new Date("2026-08-26T13:00:00.000Z");
+    const opened = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: {
+      modelTagId: otherTagId, startedAt: startedAt.toISOString(), startEvidenceId: startEvidence.id,
+      manualConfirmedValue: "R$ 100,00", notificationsEnabled: true
+    } });
+    expect(opened.statusCode).toBe(201);
+    const closeEvidence = await Promise.all([
+      createTestEvidence(otherChatterId, "corrida-fechamento-a.webp"),
+      createTestEvidence(otherChatterId, "corrida-fechamento-b.webp")
+    ]);
+    const responses = await Promise.all(closeEvidence.map((evidence) => app.inject({
+      method: "POST", url: `/api/v1/chatter/shifts/${json(opened).shift.id}/end`, headers: auth(otherToken),
+      payload: { endedAt: endedAt.toISOString(), endEvidenceId: evidence.id, manualConfirmedValue: "R$ 150,00" }
+    })));
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const content = `Other Test bateu o ponto às ${businessTimeLabel(endedAt)}h.`;
+    expect(await app.prisma.chatMessage.count({ where: { senderId: otherChatterId, modelTagId: otherTagId, kind: "SHIFT_EVENT", content } })).toBe(1);
+    await app.prisma.shift.delete({ where: { id: json(opened).shift.id } });
   });
   it("preserva o snapshot e usa a nova taxa apenas ao recalcular valores", async () => {
     const shift = await app.prisma.shift.create({ data: {
@@ -475,6 +674,12 @@ describe("turnos", () => {
     } });
     expect(opened.statusCode).toBe(201);
     expect(json(opened).shifts).toHaveLength(2);
+    for (const shift of json(opened).shifts as Array<{ modelTagId: string }>) {
+      const event = await app.prisma.chatMessage.findFirstOrThrow({
+        where: { senderId: chatterId, modelTagId: shift.modelTagId, kind: "SHIFT_EVENT" }, orderBy: { createdAt: "desc" }
+      });
+      expect(event.content).toBe(`Chatter Test abriu o ponto às ${businessTimeLabel(new Date(startedAt))}h.`);
+    }
     const current = await app.inject({ method: "GET", url: "/api/v1/chatter/shifts/current", headers: auth(chatterToken) });
     expect(json(current).shifts).toHaveLength(2);
 
@@ -491,6 +696,13 @@ describe("turnos", () => {
     } });
     expect(ended.statusCode).toBe(200);
     expect(json(ended).shifts).toHaveLength(2);
+    for (const shift of json(ended).shifts as Array<{ modelTagId: string; endedAt: string }>) {
+      const event = await app.prisma.chatMessage.findFirstOrThrow({
+        where: { senderId: chatterId, modelTagId: shift.modelTagId, kind: "SHIFT_EVENT", content: { contains: "bateu o ponto" } },
+        orderBy: { createdAt: "desc" }
+      });
+      expect(event.content).toBe(`Chatter Test bateu o ponto às ${businessTimeLabel(new Date(shift.endedAt))}h.`);
+    }
   });
   it("aceita turno anterior sem sobreposição enquanto outro chatter está online na mesma modelo", async () => {
     await app.prisma.chatterModelTag.upsert({
@@ -674,18 +886,37 @@ describe("pagamentos, chat, notificações e relatórios", () => {
   it("rejeita pagamento para chatter inexistente", async () => { const r = await app.inject({ method: "POST", url: "/api/v1/manager/payments/pay", headers: auth(managerToken), payload: { chatterId: "missing" } }); expect(r.statusCode).toBe(404); });
   it("lista histórico de pagamentos", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/manager/payments/history?page=1&pageSize=20", headers: auth(managerToken) }); expect(json(r).items.length).toBeGreaterThan(0); });
   it("lista o histórico de pagamentos para o próprio chatter", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chatter/payment/history?page=1&pageSize=20", headers: auth(chatterToken) }); expect(r.statusCode).toBe(200); expect(json(r).items.length).toBeGreaterThan(0); });
-  it("lista salas do chat", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/chat/rooms", headers: auth(chatterToken) }); expect(json(r).rooms).toHaveLength(1); });
+  it("lista as salas atualmente vinculadas sem depender da quantidade inicial", async () => {
+    const r = await app.inject({ method: "GET", url: "/api/v1/chat/rooms", headers: auth(chatterToken) });
+    expect(r.statusCode).toBe(200);
+    expect(json(r).rooms.map((room: { id: string }) => room.id)).toEqual(expect.arrayContaining([tagId, otherTagId]));
+  });
   it("permite ao gerente listar e acessar salas ativas", async () => {
     const rooms = await app.inject({ method: "GET", url: "/api/v1/chat/rooms", headers: auth(managerToken) });
     const messages = await app.inject({ method: "GET", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(managerToken) });
     expect(json(rooms).rooms.some((room: { id: string }) => room.id === tagId)).toBe(true);
     expect(messages.statusCode).toBe(200);
   });
-  it("envia mensagem", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken), payload: { content: "Olá" } }); expect(r.statusCode).toBe(201); });
-  it("lista mensagens", async () => { const r = await app.inject({ method: "GET", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken) }); expect(r.statusCode).toBe(200); expect(json(r).messages.length).toBeGreaterThan(0); });
+  it("envia mensagem de usuário com kind compatível", async () => {
+    const r = await app.inject({ method: "POST", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken), payload: { content: "Olá" } });
+    expect(r.statusCode).toBe(201);
+    expect(json(r).message.kind).toBe("USER");
+  });
+  it("lista a mensagem criada pelo próprio teste", async () => {
+    const content = `Mensagem isolada ${crypto.randomUUID()}`;
+    await app.prisma.chatMessage.create({ data: { modelTagId: tagId, senderId: chatterId, content } });
+    const r = await app.inject({ method: "GET", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken) });
+    expect(r.statusCode).toBe(200);
+    expect(json(r).messages).toEqual(expect.arrayContaining([expect.objectContaining({ content, kind: "USER" })]));
+  });
   it("rejeita mensagem vazia", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken), payload: { content: "" } }); expect(r.statusCode).toBe(400); });
   it("rejeita mensagem acima de 2000 caracteres", async () => { const r = await app.inject({ method: "POST", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(chatterToken), payload: { content: "x".repeat(2001) } }); expect(r.statusCode).toBe(400); });
-  it("rejeita acesso a sala", async () => { const r = await app.inject({ method: "GET", url: `/api/v1/chat/rooms/${tagId}/messages`, headers: auth(otherToken) }); expect(r.statusCode).toBe(403); });
+  it("rejeita acesso a uma sala criada sem vínculo para o chatter", async () => {
+    const isolatedTag = await app.prisma.modelTag.create({ data: { name: `Sala isolada ${crypto.randomUUID()}` } });
+    const r = await app.inject({ method: "GET", url: `/api/v1/chat/rooms/${isolatedTag.id}/messages`, headers: auth(otherToken) });
+    expect(r.statusCode).toBe(403);
+    await app.prisma.modelTag.delete({ where: { id: isolatedTag.id } });
+  });
   it("lista notificações", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/notifications?page=1&pageSize=20", headers: auth(chatterToken) }); expect(r.statusCode).toBe(200); expect(json(r).unreadCount).toBeGreaterThan(0); });
   it("deduplica notificações do serviço e protege leitura por proprietário", async () => {
     await createNotifications(app, {

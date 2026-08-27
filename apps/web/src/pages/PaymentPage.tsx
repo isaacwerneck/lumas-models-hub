@@ -138,6 +138,7 @@ export const PaymentPage = () => {
 
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const [deletingShiftId, setDeletingShiftId] = useState<string | null>(null);
   const [deleteTargetShiftId, setDeleteTargetShiftId] = useState<string | null>(null);
 
@@ -183,6 +184,7 @@ export const PaymentPage = () => {
   };
 
   const openShiftEditor = (shift: ReviewShift) => {
+    setEditError(null);
     setEditingShiftId(shift.id);
     setEditStartedAt(toDateTimeLocalFromIso(shift.startedAt));
     setEditEndedAt(toDateTimeLocalFromIso(shift.endedAt));
@@ -201,18 +203,18 @@ export const PaymentPage = () => {
     const endedAt = parseDateTimeLocalToIso(editEndedAt);
 
     if (!startedAt || !endedAt) {
-      setError("Preencha data/hora valida para inicio e fim do lancamento.");
+      setEditError("Preencha uma data e hora válidas para o início e o fim do lançamento.");
       return;
     }
 
     if (new Date(endedAt) <= new Date(startedAt)) {
       const feedback = "A data/hora final precisa ser posterior ao início do lançamento.";
-      setError(feedback);
+      setEditError(feedback);
       return;
     }
 
     setSavingEdit(true);
-    setError(null);
+    setEditError(null);
 
     try {
       await api.patch(`/chatter/shifts/${editingShiftId}`, {
@@ -228,7 +230,8 @@ export const PaymentPage = () => {
       await loadChatterData();
       toast.success("Lançamento atualizado com sucesso.");
     } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel atualizar o lancamento.");
+      const feedback = getApiErrorMessage(requestError, "Não foi possível atualizar o lançamento.");
+      setEditError(feedback);
       toast.error(feedback);
     } finally {
       setSavingEdit(false);
@@ -371,9 +374,9 @@ export const PaymentPage = () => {
         {shiftPagination.totalPages > 1 ? <div className="pagination"><button className="secondary-button" disabled={shiftPagination.page <= 1} onClick={() => changePage("shiftPage", shiftPage - 1)}>Anterior</button><span>Página {shiftPagination.page} de {shiftPagination.totalPages}</span><button className="secondary-button" disabled={shiftPagination.page >= shiftPagination.totalPages} onClick={() => changePage("shiftPage", shiftPage + 1)}>Próxima</button></div> : null}
       </div>
 
-      <ModalDialog open={Boolean(editingShiftId)} onClose={() => !savingEdit && setEditingShiftId(null)} ariaLabel="Editar lançamento" panelClassName="shift-edit-modal">
+      <ModalDialog open={Boolean(editingShiftId)} onClose={() => { if (!savingEdit) { setEditingShiftId(null); setEditError(null); } }} ariaLabel="Editar lançamento" panelClassName="modal shift-edit-modal">
         {editingShiftId ? <div className="form-grid">
-          <h2>Editar lancamento</h2>
+          <h2>Editar lançamento</h2>
           <p className="modal-intro">Altere os dados necessários e salve. O lançamento voltará para revisão.</p>
 
           <label>
@@ -421,12 +424,14 @@ export const PaymentPage = () => {
             <small className="field-hint">{editNotes.length}/500</small>
           </label>
 
+          {editError ? <div className="error-box shift-edit-error" role="alert">{editError}</div> : null}
+
           <div className="modal-actions">
-            <button className="primary-button" type="button" onClick={() => void saveShiftEdit()} disabled={savingEdit}>
-              {savingEdit ? "Salvando..." : "Salvar alteracoes"}
-            </button>
-            <button className="secondary-button" type="button" onClick={() => setEditingShiftId(null)} disabled={savingEdit}>
+            <button className="secondary-button" type="button" onClick={() => { setEditingShiftId(null); setEditError(null); }} disabled={savingEdit}>
               Cancelar
+            </button>
+            <button className="primary-button" type="button" onClick={() => void saveShiftEdit()} disabled={savingEdit}>
+              {savingEdit ? "Salvando…" : "Salvar alterações"}
             </button>
           </div>
         </div>

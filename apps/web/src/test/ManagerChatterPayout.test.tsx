@@ -96,4 +96,38 @@ describe("configuração de payout do chatter", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apagar definitivamente" }));
     await waitFor(() => expect(apiMocks.delete).toHaveBeenCalledWith("/manager/shifts/shift-1"));
   });
+
+  it("edita apenas o nome exibido e exige o nome atual para excluir o perfil", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/manager/chatters/chatter-1") return Promise.resolve({ data: { chatter: {
+        id: "chatter-1", username: "julia", displayName: "Julia", isActive: true, payoutPercentage: 20, modelTags: []
+      } } });
+      if (url.includes("/shifts")) return Promise.resolve({ data: { items: [], pagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 } } });
+      if (url.includes("/payments")) return Promise.resolve({ data: { items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 1 } } });
+      return Promise.resolve({ data: { tags: [] } });
+    });
+    apiMocks.patch.mockResolvedValue({ data: { user: { displayName: "Ju" } } });
+    apiMocks.delete.mockResolvedValue({ data: { success: true } });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Editar nome de Julia" }));
+    const nameInput = screen.getByLabelText("Nome exibido");
+    fireEvent.change(nameInput, { target: { value: "Ju" } });
+    fireEvent.click(screen.getByRole("button", { name: "Salvar nome" }));
+
+    await waitFor(() => expect(apiMocks.patch).toHaveBeenCalledWith("/manager/users/chatter-1", { displayName: "Ju" }));
+    expect(await screen.findByRole("heading", { name: "Ju", level: 1 })).toBeInTheDocument();
+    expect(screen.getAllByText(/@julia/).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Excluir perfil" }));
+    const confirmation = screen.getByLabelText(/Digite Ju para confirmar/);
+    const deleteButton = screen.getByRole("button", { name: "Excluir perfil definitivamente" });
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(confirmation, { target: { value: "Julia" } });
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(confirmation, { target: { value: "Ju" } });
+    expect(deleteButton).toBeEnabled();
+    fireEvent.click(deleteButton);
+    await waitFor(() => expect(apiMocks.delete).toHaveBeenCalledWith("/manager/users/chatter-1"));
+  });
 });

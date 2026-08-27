@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import dotenv from "dotenv";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Role } from "@prisma/client";
 
 const apiRoot = path.resolve(__dirname, "..");
 dotenv.config({ path: path.join(apiRoot, ".env") });
@@ -47,6 +47,13 @@ const main = async () => {
     env: process.env,
     stdio: "inherit"
   });
+
+  const e2ePrisma = new PrismaClient({ datasources: { db: { url: e2eUrl.toString() } } });
+  await e2ePrisma.user.updateMany({
+    where: { role: Role.MANAGER, username: { in: ["julia", "diego"] } },
+    data: { mustChangePassword: false }
+  });
+  await e2ePrisma.$disconnect();
 
   await import("../src/server");
 };

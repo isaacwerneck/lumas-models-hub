@@ -9,7 +9,18 @@ import { getMonthRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
 import { calculatePayoutCents } from "../../utils/payout";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { queueEvidencePurge } from "../../services/evidence-cleanup";
-import { assertNoShiftOverlap, assertOpenShiftLimit, lockShiftChatter, lockShiftModels, ShiftOverlapError } from "./shift-overlap";
+import { modelRoomName } from "../chat/chat.shared";
+import { createShiftChatEvent } from "./shift-chat";
+import {
+  assertModelsHaveNoOpenShift,
+  assertNoShiftOverlap,
+  assertOpenShiftLimit,
+  ChatterUnavailableError,
+  lockShiftChatter,
+  lockShiftModels,
+  ModelOpenShiftError,
+  ShiftOverlapError
+} from "./shift-overlap";
 
 const moneyMetadataSchema = z.object({
   currency: z.enum(["BRL", "USD"]).default("BRL"),
@@ -372,6 +383,12 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const updatedShift = await fastify.prisma.$transaction(async (tx) => {
+      await lockShiftChatter(tx, authUser.sub);
+      const activeChatter = await tx.user.findFirst({
+        where: { id: authUser.sub, role: Role.CHATTER, isActive: true, deletedAt: null },
+        select: { id: true }
+      });
+      if (!activeChatter) throw new ChatterUnavailableError();
       await lockShiftModels(tx, [shift.modelTagId]);
       await assertNoShiftOverlap(tx, {
         modelTagId: shift.modelTagId,
@@ -523,41 +540,6 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ message: "Data/hora de inicio invalida." });
     }
 
-    const chatterHasTag = await fastify.prisma.chatterModelTag.findFirst({
-      where: {
-        chatterId: authUser.sub,
-        modelTagId: body.modelTagId,
-        modelTag: { isActive: true }
-      }
-    });
-
-    if (!chatterHasTag) {
-      return reply.code(403).send({ message: "Chatter não vinculado a essa modelo." });
-    }
-
-    const existingOpenShift = await fastify.prisma.shift.findFirst({
-      where: { status: ShiftStatus.OPEN, modelTagId: body.modelTagId },
-      include: {
-        chatter: {
-          select: {
-            id: true,
-            displayName: true
-          }
-        }
-      }
-    });
-
-    if (existingOpenShift) {
-      return reply.code(409).send({
-        message: "Já existe um chatter em turno aberto para essa modelo.",
-        openShift: {
-          id: existingOpenShift.id,
-          chatter: existingOpenShift.chatter,
-          startedAt: existingOpenShift.startedAt
-        }
-      });
-    }
-
     const resolvedCents = resolveOcrValueCents({
       detectedValue: body.ocrDetectedValue,
       rawText: body.ocrRawText
@@ -587,12 +569,24 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    let shift;
+    let result;
     try {
-      shift = await fastify.prisma.$transaction(async (tx) => {
+      result = await fastify.prisma.$transaction(async (tx) => {
       await lockShiftChatter(tx, authUser.sub);
       await lockShiftModels(tx, [body.modelTagId]);
+      const chatter = await tx.user.findFirst({
+        where: { id: authUser.sub, role: Role.CHATTER, isActive: true, deletedAt: null },
+        select: { id: true, displayName: true }
+      });
+      const chatterHasTag = chatter
+        ? await tx.chatterModelTag.findFirst({
+            where: { chatterId: authUser.sub, modelTagId: body.modelTagId, modelTag: { isActive: true } },
+            select: { id: true }
+          })
+        : null;
+      if (!chatter || !chatterHasTag) throw new Error("CHATTER_TAG_UNAVAILABLE");
       await assertOpenShiftLimit(tx, authUser.sub, 1);
+      await assertModelsHaveNoOpenShift(tx, [body.modelTagId]);
       await assertNoShiftOverlap(tx, { modelTagId: body.modelTagId, startedAt });
       if (body.startEvidenceId) {
         const claimed = await tx.evidence.updateMany({
@@ -635,18 +629,32 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           ...auditRequestMetadata(request)
         }
       } });
-      return created;
+      const chatMessage = await createShiftChatEvent(tx, {
+        chatterId: chatter.id,
+        chatterDisplayName: chatter.displayName,
+        modelTagId: created.modelTagId,
+        occurredAt: startedAt,
+        event: "OPENED"
+      });
+      return { shift: created, chatMessage };
       });
     } catch (error) {
+      if (error instanceof ModelOpenShiftError) {
+        return reply.code(409).send({ message: error.message, conflictingShiftId: error.conflictingShiftId });
+      }
       if (error instanceof ShiftOverlapError) {
         return reply.code(409).send({ message: error.message, conflictingShiftId: error.conflictingShiftId });
       }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return reply.code(409).send({ message: "Outro turno foi aberto ao mesmo tempo. Atualize a página e tente novamente." });
       }
+      if ((error as Error).message === "CHATTER_TAG_UNAVAILABLE") return reply.code(403).send({ message: "Chatter não vinculado a essa modelo." });
       if ((error as Error).message === "EVIDENCE_NOT_ATTACHABLE") return reply.code(409).send({ message: "Comprovante inválido, já utilizado ou pertencente a outro usuário." });
       throw error;
     }
+
+    const { shift, chatMessage } = result;
+    fastify.io.to(modelRoomName(shift.modelTagId)).emit("chat:message", chatMessage);
 
     return reply.code(201).send({
       shift,
@@ -678,7 +686,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         chatterId: authUser.sub,
         status: ShiftStatus.OPEN
       },
-      include: { chatter: { select: { payoutPercentage: true } } }
+      include: { chatter: { select: { payoutPercentage: true, displayName: true } } }
     });
 
     if (!shift) {
@@ -734,8 +742,12 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         })).map((manager) => manager.id)
       : [];
 
-    const closedShift = await fastify.prisma.$transaction(async (tx) => {
+    const closedResult = await fastify.prisma.$transaction(async (tx) => {
       await lockShiftModels(tx, [shift.modelTagId]);
+      const stillOpen = await tx.shift.count({
+        where: { id: shift.id, chatterId: authUser.sub, status: ShiftStatus.OPEN }
+      });
+      if (stillOpen !== 1) throw new Error("SHIFT_NO_LONGER_OPEN");
       await assertNoShiftOverlap(tx, {
         modelTagId: shift.modelTagId,
         startedAt: shift.startedAt,
@@ -803,15 +815,29 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      return updatedShift;
+      const chatMessage = await createShiftChatEvent(tx, {
+        chatterId: authUser.sub,
+        chatterDisplayName: shift.chatter.displayName,
+        modelTagId: shift.modelTagId,
+        occurredAt: endedAt,
+        event: "CLOSED"
+      });
+      return { shift: updatedShift, chatMessage };
     }).catch((error: unknown) => {
-      if ((error as Error).message === "EVIDENCE_NOT_ATTACHABLE") return null;
+      if ((error as Error).message === "EVIDENCE_NOT_ATTACHABLE") return "EVIDENCE_NOT_ATTACHABLE" as const;
+      if ((error as Error).message === "SHIFT_NO_LONGER_OPEN") return "SHIFT_NO_LONGER_OPEN" as const;
       throw error;
     });
 
-    if (!closedShift) {
+    if (closedResult === "EVIDENCE_NOT_ATTACHABLE") {
       return reply.code(409).send({ message: "Comprovante inválido, já utilizado ou pertencente a outro usuário." });
     }
+    if (closedResult === "SHIFT_NO_LONGER_OPEN") {
+      return reply.code(409).send({ message: "Este ponto já foi encerrado. Atualize a página." });
+    }
+
+    const { shift: closedShift, chatMessage } = closedResult;
+    fastify.io.to(modelRoomName(closedShift.modelTagId)).emit("chat:message", chatMessage);
 
     fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, {
       shiftId: closedShift.id,

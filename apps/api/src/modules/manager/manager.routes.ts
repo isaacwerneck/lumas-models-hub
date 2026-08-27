@@ -1,4 +1,4 @@
-import { AuditAction, EarningsStatus, Prisma, ReconciliationStatus, Role } from "@prisma/client";
+import { AuditAction, EarningsStatus, Prisma, ReconciliationStatus, Role, ShiftStatus } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { hashPassword } from "../../utils/password";
@@ -10,6 +10,7 @@ import { processStorageDeletionJobs, queueEvidencePurge } from "../../services/e
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM, PAYMENTS_UPDATED_EVENT } from "./manager.events";
 import { businessDateKey, businessDateKeysInclusive } from "../../utils/time";
 import { MAX_PAYOUT_PERCENTAGE, MIN_PAYOUT_PERCENTAGE } from "../../utils/payout";
+import { lockShiftChatter } from "../chatter/shift-overlap";
 
 const ensureManagerRole = (role: Role) => role === Role.MANAGER;
 
@@ -22,7 +23,7 @@ const userCreateSchema = z.object({
 });
 
 const userUpdateSchema = z.object({
-  displayName: z.string().min(2).max(100).optional(),
+  displayName: z.string().trim().min(2).max(100).optional(),
   role: z.enum([Role.CHATTER, Role.MANAGER]).optional(),
   isActive: z.boolean().optional(),
   password: z.string().min(8).max(128).optional(),
@@ -114,6 +115,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const query = chatterListQuerySchema.parse(request.query);
     const where: Prisma.UserWhereInput = {
       role: Role.CHATTER,
+      deletedAt: null,
       ...(query.search
         ? {
             OR: [
@@ -220,7 +222,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const params = userIdParamsSchema.parse(request.params);
 
     const chatter = await fastify.prisma.user.findFirst({
-      where: { id: params.userId, role: Role.CHATTER },
+      where: { id: params.userId, role: Role.CHATTER, deletedAt: null },
       select: {
         id: true,
         username: true,
@@ -311,7 +313,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     const params = userIdParamsSchema.parse(request.params);
     const chatter = await fastify.prisma.user.findFirst({
-      where: { id: params.userId, role: Role.CHATTER },
+      where: { id: params.userId, role: Role.CHATTER, deletedAt: null },
       select: {
         id: true, username: true, displayName: true, isActive: true, payoutPercentage: true, createdAt: true,
         chatterModelTags: { include: { modelTag: { select: { id: true, name: true, isActive: true } } } }
@@ -347,7 +349,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         ...paginationArgs(query.page, query.pageSize)
       }),
       fastify.prisma.shift.count({ where }),
-      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER } })
+      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER, deletedAt: null } })
     ]);
     if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
     return {
@@ -384,7 +386,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         ...paginationArgs(query.page, query.pageSize)
       }),
       fastify.prisma.paymentHistory.count({ where }),
-      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER } })
+      fastify.prisma.user.count({ where: { id: params.userId, role: Role.CHATTER, deletedAt: null } })
     ]);
     if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
     return {
@@ -458,7 +460,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
 
     const targetUser = await fastify.prisma.user.findUnique({
       where: {
-        id: params.userId
+        id: params.userId,
+        deletedAt: null
       }
     });
 
@@ -541,7 +544,9 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
             username: targetUser.username,
             ...auditRequestMetadata(request),
             changes: {
-              displayName: body.displayName,
+              displayName: body.displayName === undefined
+                ? undefined
+                : { before: targetUser.displayName, after: body.displayName },
               role: body.role,
               isActive: body.isActive,
               payoutPercentage: body.payoutPercentage === undefined
@@ -563,12 +568,76 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     return { user: updated };
   });
 
+  fastify.delete("/users/:userId", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+    if (!ensureManagerRole(authUser.role)) {
+      return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    }
+
+    const params = userIdParamsSchema.parse(request.params);
+    const deletedAt = new Date();
+
+    try {
+      const user = await fastify.prisma.$transaction(async (tx) => {
+        await lockShiftChatter(tx, params.userId);
+        const target = await tx.user.findFirst({
+          where: { id: params.userId, role: Role.CHATTER, deletedAt: null },
+          select: { id: true, username: true, displayName: true, isActive: true }
+        });
+        if (!target) throw new Error("CHATTER_NOT_FOUND");
+
+        const [openShifts, pendingEarnings] = await Promise.all([
+          tx.shift.count({ where: { chatterId: target.id, status: ShiftStatus.OPEN } }),
+          tx.earnings.count({ where: { chatterId: target.id, status: EarningsStatus.PENDING } })
+        ]);
+        if (openShifts > 0) throw new Error("CHATTER_HAS_OPEN_SHIFT");
+        if (pendingEarnings > 0) throw new Error("CHATTER_HAS_PENDING_EARNINGS");
+
+        const updated = await tx.user.update({
+          where: { id: target.id },
+          data: { deletedAt, isActive: false, authVersion: { increment: 1 } },
+          select: { id: true, username: true, displayName: true, isActive: true, deletedAt: true }
+        });
+        await tx.refreshSession.updateMany({
+          where: { userId: target.id, revokedAt: null },
+          data: { revokedAt: deletedAt }
+        });
+        await tx.auditLog.create({
+          data: {
+            actorId: authUser.sub,
+            action: AuditAction.USER_UPDATED,
+            targetType: "User",
+            targetId: target.id,
+            metadata: {
+              username: target.username,
+              changes: {
+                isActive: { before: target.isActive, after: false },
+                deletedAt: { before: null, after: deletedAt.toISOString() }
+              },
+              ...auditRequestMetadata(request)
+            }
+          }
+        });
+        return updated;
+      });
+
+      fastify.io.in(`user:${user.id}`).disconnectSockets(true);
+      return { success: true, user };
+    } catch (error) {
+      const code = (error as Error).message;
+      if (code === "CHATTER_NOT_FOUND") return reply.code(404).send({ message: "Chatter não encontrado." });
+      if (code === "CHATTER_HAS_OPEN_SHIFT") return reply.code(409).send({ message: "Encerre ou cancele o ponto aberto antes de apagar este chatter." });
+      if (code === "CHATTER_HAS_PENDING_EARNINGS") return reply.code(409).send({ message: "Quite ou remova os ganhos pendentes antes de apagar este chatter." });
+      throw error;
+    }
+  });
+
   fastify.post("/users/:userId/reset-password", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { role: Role; sub: string };
     if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
     const params = userIdParamsSchema.parse(request.params);
     const body = resetPasswordSchema.parse(request.body);
-    const target = await fastify.prisma.user.findUnique({ where: { id: params.userId }, select: { id: true, username: true } });
+    const target = await fastify.prisma.user.findUnique({ where: { id: params.userId, deletedAt: null }, select: { id: true, username: true } });
     if (!target) return reply.code(404).send({ message: "Usuário não encontrado." });
     const passwordHash = await hashPassword(body.password);
     await fastify.prisma.$transaction([
@@ -828,7 +897,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const chatter = await fastify.prisma.user.findFirst({
       where: {
         id: params.userId,
-        role: Role.CHATTER
+        role: Role.CHATTER,
+        deletedAt: null
       }
     });
 
@@ -925,6 +995,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const query = chatterListQuerySchema.parse(request.query);
     const where: Prisma.UserWhereInput = {
       role: Role.CHATTER,
+      deletedAt: null,
       ...(query.search ? { displayName: { contains: query.search, mode: "insensitive" } } : {}),
       ...(query.status === "active" ? { isActive: true } : query.status === "inactive" ? { isActive: false } : {})
     };
@@ -1016,7 +1087,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const requestKey = typeof requestKeyHeader === "string" && requestKeyHeader.length <= 100 ? requestKeyHeader : undefined;
 
     const chatter = await fastify.prisma.user.findFirst({
-      where: { id: body.chatterId, role: Role.CHATTER }
+      where: { id: body.chatterId, role: Role.CHATTER, deletedAt: null }
     });
 
     if (!chatter) {

@@ -21,6 +21,23 @@ export class ShiftLimitError extends Error {
   }
 }
 
+export class ModelOpenShiftError extends Error {
+  readonly statusCode = 409;
+  constructor(
+    public readonly conflictingShiftId: string,
+    public readonly chatterDisplayName: string
+  ) {
+    super(`O chatter ${chatterDisplayName} está com o ponto aberto no momento.`);
+  }
+}
+
+export class ChatterUnavailableError extends Error {
+  readonly statusCode = 409;
+  constructor() {
+    super("Este chatter foi arquivado e não pode criar ou recalcular ganhos.");
+  }
+}
+
 export const lockShiftChatter = async (tx: Prisma.TransactionClient, chatterId: string) => {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`shift:chatter:${chatterId}`}))`;
 };
@@ -35,6 +52,15 @@ export const lockShiftModels = async (tx: Prisma.TransactionClient, modelTagIds:
   for (const modelTagId of sortedIds) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`shift:model:${modelTagId}`}))`;
   }
+};
+
+export const assertModelsHaveNoOpenShift = async (tx: Prisma.TransactionClient, modelTagIds: string[]) => {
+  const conflict = await tx.shift.findFirst({
+    where: { modelTagId: { in: [...new Set(modelTagIds)] }, status: ShiftStatus.OPEN },
+    orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+    select: { id: true, chatter: { select: { displayName: true } } }
+  });
+  if (conflict) throw new ModelOpenShiftError(conflict.id, conflict.chatter.displayName);
 };
 
 export const findOverlappingShift = async (tx: Prisma.TransactionClient, interval: Interval) => {

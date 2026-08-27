@@ -10,6 +10,8 @@ export const nowInBusinessTz = () => dayjs().tz(env.TZ);
 
 export const businessDateKey = (date: Date) => dayjs(date).tz(env.TZ).format("YYYY-MM-DD");
 
+export const businessTimeLabel = (date: Date) => dayjs(date).tz(env.TZ).format("HH:mm");
+
 export const businessDateKeysInclusive = (firstKey: string, lastKey: string) => {
   const keys: string[] = [];
   let cursor = dayjs.tz(firstKey, env.TZ).startOf("day");

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   businessDateKey,
   businessDateKeysInclusive,
+  businessTimeLabel,
   daysUntilNextMonday,
   getCurrentWeekHalfOpenRange,
   getMonthRangeInBusinessTz,
@@ -44,5 +45,9 @@ describe("períodos em America/Sao_Paulo", () => {
     expect(businessDateKeysInclusive("2026-08-30", "2026-09-02")).toEqual([
       "2026-08-30", "2026-08-31", "2026-09-01", "2026-09-02"
     ]);
+  });
+
+  it("formata o horário dos eventos no fuso do negócio", () => {
+    expect(businessTimeLabel(new Date("2026-08-20T01:30:00.000Z"))).toBe("22:30");
   });
 });

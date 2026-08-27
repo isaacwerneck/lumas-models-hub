@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { io, Socket } from "socket.io-client";
+import { Clock3 } from "lucide-react";
 import { api, getAccessToken } from "../lib/api";
 import { SOCKET_URL } from "../lib/runtime";
 import { formatTime } from "../lib/dateTime";
@@ -12,7 +13,8 @@ type ChatMessage = {
   content: string;
   createdAt: string;
   modelTagId: string;
-  sender: {
+  kind?: "USER" | "SHIFT_EVENT";
+  sender?: {
     id: string;
     displayName: string;
     username: string;
@@ -124,7 +126,7 @@ export const ChatPage = () => {
     }
 
     const onMessage = (message: ChatMessage) => {
-      if (message.sender && message.modelTagId === roomId) {
+      if (message.modelTagId === roomId) {
         setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
       }
     };
@@ -202,13 +204,21 @@ export const ChatPage = () => {
       <div className="card chat-box">
         <h2>Mensagens</h2>
 
-        <div className="messages">
+        <div className="messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da sala">
           {loadingMessages ? <div className="skeleton-list"><div className="skeleton" /><div className="skeleton" /></div> : null}
-          {messages.map((message) => (
+          {messages.map((message) => message.kind === "SHIFT_EVENT" ? (
+            <div key={message.id} className="shift-event">
+              <span className="shift-event-rule" aria-hidden="true" />
+              <Clock3 size={16} aria-hidden="true" />
+              <p>{message.content}</p>
+              <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+              <span className="shift-event-rule" aria-hidden="true" />
+            </div>
+          ) : (
             <div key={message.id} className="message-item">
               <div className="meta">
-                <strong>{message.sender.displayName}</strong>
-                <span>{formatTime(message.createdAt)}</span>
+                <strong>{message.sender?.displayName ?? "Sistema"}</strong>
+                <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               </div>
               <p>{message.content}</p>
             </div>
@@ -217,7 +227,9 @@ export const ChatPage = () => {
         </div>
 
         <form className="chat-form" onSubmit={onSend}>
+          <label className="visually-hidden" htmlFor="chat-message-content">Mensagem</label>
           <input
+            id="chat-message-content"
             value={content}
             onChange={(event) => setContent(event.target.value)}
             placeholder="Digite sua mensagem"

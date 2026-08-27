@@ -99,6 +99,7 @@ model User {
   mustChangePassword  Boolean           @default(false)
   payoutPercentage    Int               @default(20)
   shiftReminderIntervalMinutes Int      @default(60)
+  deletedAt           DateTime?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -118,6 +119,7 @@ model User {
   paymentReceipts     PaymentReceipt[] @relation("PaymentReceiptUploader")
 
   @@index([role])
+  @@index([role, deletedAt])
 }
 
 model ModelTag {
@@ -247,6 +249,7 @@ model ChatMessage {
   modelTagId       String
   senderId         String
   content          String
+  kind             String   @default("USER")
   createdAt        DateTime @default(now())
 
   modelTag         ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Restrict)

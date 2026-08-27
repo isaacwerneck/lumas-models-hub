@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { Pencil } from "lucide-react";
 import type { Pagination } from "@lumas/contracts";
 import { api, downloadApiFile } from "../lib/api";
 import { useToast } from "../components/Toast";
@@ -49,6 +50,7 @@ type ChatterDetail = {
 
 export const ManagerChatterDetailPage = () => {
   const { chatterId } = useParams<{ chatterId: string }>();
+  const navigate = useNavigate();
   const toast = useToast();
   const [chatter, setChatter] = useState<ChatterDetail | null>(null);
   const [allTags, setAllTags] = useState<Tag[]>([]);
@@ -64,6 +66,14 @@ export const ManagerChatterDetailPage = () => {
   const [deletingShift, setDeletingShift] = useState(false);
   const [payoutDraft, setPayoutDraft] = useState("20");
   const [savingPayout, setSavingPayout] = useState(false);
+  const [editNameOpen, setEditNameOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [savingName, setSavingName] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [deleteProfileOpen, setDeleteProfileOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deletingProfile, setDeletingProfile] = useState(false);
+  const [deleteProfileError, setDeleteProfileError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -183,6 +193,61 @@ export const ManagerChatterDetailPage = () => {
     }
   };
 
+  const openNameEditor = () => {
+    if (!chatter) return;
+    setNameDraft(chatter.displayName);
+    setNameError(null);
+    setEditNameOpen(true);
+  };
+
+  const saveDisplayName = async () => {
+    if (!chatterId || !chatter) return;
+    const displayName = nameDraft.trim();
+    if (displayName.length < 2 || displayName.length > 100) {
+      setNameError("O nome precisa ter entre 2 e 100 caracteres.");
+      return;
+    }
+
+    setSavingName(true);
+    setNameError(null);
+    try {
+      const response = await api.patch(`/manager/users/${chatterId}`, { displayName });
+      const savedDisplayName = response.data.user?.displayName ?? displayName;
+      setChatter((current) => current ? { ...current, displayName: savedDisplayName } : current);
+      setEditNameOpen(false);
+      toast.success("Nome do chatter atualizado.");
+    } catch (requestError: unknown) {
+      const feedback = getApiErrorMessage(requestError, "Não foi possível atualizar o nome do chatter.");
+      setNameError(feedback);
+      toast.error(feedback);
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const openProfileDeletion = () => {
+    setDeleteConfirmation("");
+    setDeleteProfileError(null);
+    setDeleteProfileOpen(true);
+  };
+
+  const deleteProfile = async () => {
+    if (!chatterId || !chatter || deleteConfirmation.trim() !== chatter.displayName) return;
+    setDeletingProfile(true);
+    setDeleteProfileError(null);
+    try {
+      await api.delete(`/manager/users/${chatterId}`);
+      toast.success(`Perfil de ${chatter.displayName} excluído.`);
+      navigate("/chatters", { replace: true });
+    } catch (requestError: unknown) {
+      const feedback = getApiErrorMessage(requestError, "Não foi possível excluir o perfil do chatter.");
+      setDeleteProfileError(feedback);
+      toast.error(feedback);
+    } finally {
+      setDeletingProfile(false);
+    }
+  };
+
   const totalPages = shiftPagination.totalPages;
   const safePage = shiftPagination.page;
   const pageShifts = shifts;
@@ -209,7 +274,12 @@ export const ManagerChatterDetailPage = () => {
     <section className="stack-gap chatter-detail-page">
       <div className="page-header chatter-detail-header">
         <div>
-          <h1>{chatter.displayName}</h1>
+          <div className="chatter-name-heading">
+            <h1>{chatter.displayName}</h1>
+            <button type="button" className="chatter-name-edit" onClick={openNameEditor} aria-label={`Editar nome de ${chatter.displayName}`} title="Editar nome">
+              <Pencil size={16} aria-hidden="true" />
+            </button>
+          </div>
           <p>
             @{chatter.username} ·{" "}
             <span className={chatter.isActive ? "status-badge paid" : "status-badge"}>
@@ -313,6 +383,35 @@ export const ManagerChatterDetailPage = () => {
           Salvar tags
         </button>
       </div>
+
+      <ModalDialog open={editNameOpen} onClose={() => !savingName && setEditNameOpen(false)} ariaLabel="Editar nome do chatter">
+        <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void saveDisplayName(); }}>
+          <h2>Editar nome do chatter</h2>
+          <p>O nome exibido será atualizado em toda a operação. O login <strong>@{chatter.username}</strong> não será alterado.</p>
+          <label htmlFor="chatter-display-name">
+            Nome exibido
+            <input
+              id="chatter-display-name"
+              value={nameDraft}
+              onChange={(event) => { setNameDraft(event.target.value); setNameError(null); }}
+              minLength={2}
+              maxLength={100}
+              autoComplete="off"
+              autoFocus
+              aria-invalid={Boolean(nameError)}
+              aria-describedby={nameError ? "chatter-name-error" : undefined}
+              required
+            />
+          </label>
+          {nameError ? <div id="chatter-name-error" className="error-box" role="alert">{nameError}</div> : null}
+          <div className="modal-actions">
+            <button className="secondary-button" type="button" onClick={() => setEditNameOpen(false)} disabled={savingName}>Cancelar</button>
+            <button className="primary-button" type="submit" disabled={savingName || nameDraft.trim() === chatter.displayName || nameDraft.trim().length < 2}>
+              {savingName ? "Salvando…" : "Salvar nome"}
+            </button>
+          </div>
+        </form>
+      </ModalDialog>
 
       <div className="card table-card manager-shifts-card" tabIndex={0} aria-label="Turnos do chatter">
         <h2>Horas subidas (turnos)</h2>
@@ -470,6 +569,39 @@ export const ManagerChatterDetailPage = () => {
         </table>
         {payments.length === 0 ? <p className="empty-hint">Nenhum pagamento registrado para este chatter.</p> : null}
       </div>
+
+      <section className="card manager-danger-zone" aria-labelledby="manager-danger-zone-title">
+        <div>
+          <h2 id="manager-danger-zone-title">Zona de perigo</h2>
+          <p>Exclua o acesso deste chatter sem remover turnos, pagamentos, mensagens ou registros de auditoria.</p>
+        </div>
+        <button className="danger-button" type="button" onClick={openProfileDeletion}>Excluir perfil</button>
+      </section>
+
+      <ModalDialog open={deleteProfileOpen} onClose={() => !deletingProfile && setDeleteProfileOpen(false)} ariaLabel="Excluir perfil do chatter" panelClassName="modal manager-delete-profile-modal">
+        <h2>Excluir perfil de {chatter.displayName}?</h2>
+        <p>O acesso será encerrado. Turnos, pagamentos, mensagens e registros de auditoria serão preservados.</p>
+        <label htmlFor="delete-chatter-confirmation">
+          Digite <strong>{chatter.displayName}</strong> para confirmar
+          <input
+            id="delete-chatter-confirmation"
+            value={deleteConfirmation}
+            onChange={(event) => { setDeleteConfirmation(event.target.value); setDeleteProfileError(null); }}
+            autoComplete="off"
+            disabled={deletingProfile}
+            aria-invalid={Boolean(deleteProfileError)}
+            aria-describedby={deleteProfileError ? "delete-chatter-error" : "delete-chatter-hint"}
+          />
+          <small id="delete-chatter-hint" className="field-hint">Esta ação impede novos acessos e não pode ser desfeita pela interface.</small>
+        </label>
+        {deleteProfileError ? <div id="delete-chatter-error" className="error-box" role="alert">{deleteProfileError}</div> : null}
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={() => setDeleteProfileOpen(false)} disabled={deletingProfile}>Cancelar</button>
+          <button className="danger-button" type="button" onClick={() => void deleteProfile()} disabled={deletingProfile || deleteConfirmation.trim() !== chatter.displayName}>
+            {deletingProfile ? "Excluindo…" : "Excluir perfil definitivamente"}
+          </button>
+        </div>
+      </ModalDialog>
 
       {error ? <div className="error-box">{error}</div> : null}
     </section>

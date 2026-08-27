@@ -85,7 +85,7 @@ test("gerente percorre todas as rotas e encerra a sessão sem erros", async ({ p
     ["/home", "Dashboard"],
     ["/chatters", "Chatters"],
     ["/pagamentos", "Pagamentos"],
-    ["/chat", "Chat"],
+    ["/chat", "Central do modelo"],
     ["/funcionario-do-mes", "Funcionário do Mês"],
     ["/auditoria", "Auditoria"],
     ["/config", "Configurações"]
@@ -127,7 +127,7 @@ test("chatter percorre todas as rotas operacionais e troca a senha temporária",
   const routes = [
     ["/horarios", "Horários"],
     ["/pagamento", "Pagamento"],
-    ["/chat", "Chat"],
+    ["/chat", "Central do modelo"],
     ["/funcionario-do-mes", "Funcionário do Mês"],
     ["/config", "Configurações"]
   ] as const;

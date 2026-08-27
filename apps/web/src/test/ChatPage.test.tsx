@@ -105,6 +105,20 @@ describe("ChatPage realtime", () => {
     expect(mocks.post).not.toHaveBeenCalled();
   });
 
+  it("renderiza evento de ponto como item semântico separado das mensagens humanas", async () => {
+    mocks.get.mockImplementation((url: string) => Promise.resolve(url.endsWith("/messages")
+      ? { data: { messages: [{ ...message("shift-1", "Isaac abriu o ponto às 14:53."), kind: "SHIFT_EVENT" }] } }
+      : { data: { rooms: [{ id: "room-1", name: "Annie" }] } }));
+
+    render(<ChatPage />);
+
+    const log = await screen.findByRole("log", { name: "Mensagens da sala" });
+    const event = await screen.findByText("Isaac abriu o ponto às 14:53.");
+    expect(log).toContainElement(event);
+    expect(event.closest(".shift-event")).not.toBeNull();
+    expect(screen.queryByText("Isaac", { selector: ".message-item strong" })).not.toBeInTheDocument();
+  });
+
   it("mostra erro v1 quando o fallback HTTP falha", async () => {
     mocks.get.mockImplementation((url: string) => Promise.resolve(url.endsWith("/messages")
       ? { data: { messages: [] } }

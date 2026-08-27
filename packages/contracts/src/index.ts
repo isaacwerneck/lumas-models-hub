@@ -127,6 +127,7 @@ export const ChatRoomSchema = z.object({ id: z.string(), name: z.string(), isAct
 export type ChatRoomDto = z.infer<typeof ChatRoomSchema>;
 export const ChatMessageSchema = z.object({
   id: z.string(), content: z.string().max(2000), createdAt: z.string(), modelTagId: z.string(),
+  kind: z.enum(["USER", "SHIFT_EVENT"]).optional(),
   sender: z.object({ id: z.string(), displayName: z.string(), username: z.string(), role: RoleSchema })
 });
 export type ChatMessageDto = z.infer<typeof ChatMessageSchema>;

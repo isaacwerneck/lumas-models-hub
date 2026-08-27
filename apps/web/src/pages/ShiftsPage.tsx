@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { ImageDropzone } from "../components/ImageDropzone";
 import { ModalDialog } from "../components/ModalDialog";
@@ -71,6 +71,7 @@ export const ShiftsPage = () => {
   const [closeAt, setCloseAt] = useState(() => toDateTimeLocalValue(new Date()));
   const [pasteTarget, setPasteTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -106,6 +107,12 @@ export const ShiftsPage = () => {
   }, []);
 
   useEffect(() => { void loadData(); }, [loadData]);
+
+  useEffect(() => {
+    if (!error) return;
+    const frame = window.requestAnimationFrame(() => errorRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [error]);
 
   const setDraftEvidence = useCallback((scope: DraftScope, key: string, side: EvidenceSide, patch: Partial<EvidenceDraft>) => {
     const update = <T extends ModelDraft>(items: T[]) => items.map((item) => item.key === key ? { ...item, [side]: { ...item[side], ...patch } } : item);
@@ -242,6 +249,7 @@ export const ShiftsPage = () => {
   );
   const fields = (scope: DraftScope, draft: ModelDraft, side: EvidenceSide, label: string) => <ValueFields draftKey={draft.key} side={side} label={label} value={draft[side]} pasteTarget={pasteTarget}
     onActivate={() => setPasteTarget(`${scope}:${draft.key}:${side}`)} onFile={(file) => void applyImage(scope, draft.key, side, file)} onChange={(patch) => setDraftEvidence(scope, draft.key, side, patch)} />;
+  const workflowError = error ? <div ref={errorRef} className="error-box shift-workflow-error" role="alert" tabIndex={-1}>{error}</div> : null;
 
   return <section className="stack-gap shifts-page">
     <div className="page-header"><div><h1>Horários</h1><p>Registre pontos atuais ou lance um período anterior</p></div></div>
@@ -256,6 +264,7 @@ export const ShiftsPage = () => {
       <label className="shared-time-field">Início do ponto<input type="datetime-local" value={liveStartAt} onChange={(event) => setLiveStartAt(event.target.value)} required /></label>
       <div className="shift-model-grid">{liveDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("live", draft, liveDrafts)}{fields("live", draft, "start", "início")}</section>)}</div>
       {liveDrafts.length < 2 && rooms.length > liveDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("live")}>+ Adicionar segunda modelo</button> : null}
+      {workflowError}
       <button className="primary-button" type="submit" disabled={submitting || !notificationsEnabled}>{submitting ? "Abrindo…" : liveDrafts.length === 2 ? "Abrir os dois pontos" : "Abrir ponto"}</button>
     </form> : null}
 
@@ -268,7 +277,8 @@ export const ShiftsPage = () => {
         {closeMph[index] !== null ? <div className={`mph-chip ${closeMph[index]! < 0 ? "mph-negative" : ""}`}><span>MPH estimado</span><strong>{formatBrl(closeMph[index]!)}/h</strong></div> : null}
         {hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setClosingDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}
       </section>)}</div>
-      <div className="form-actions"><button type="button" className="danger-button" onClick={() => setConfirmCancel(true)} disabled={submitting}>Cancelar ponto</button><button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Encerrando…" : currentShifts.length === 2 ? "Encerrar os dois pontos" : "Encerrar ponto"}</button></div>
+      {workflowError}
+      <div className="shift-close-actions" role="group" aria-label="Ações do ponto aberto"><button type="button" className="danger-button" onClick={() => setConfirmCancel(true)} disabled={submitting}>{currentShifts.length === 2 ? "Cancelar os dois pontos" : "Cancelar ponto"}</button><button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Encerrando…" : currentShifts.length === 2 ? "Encerrar os dois pontos" : "Encerrar ponto"}</button></div>
     </form> : null}
 
     {mode === "retroactive" ? <form className="card form-grid shift-workflow-card" onSubmit={submitRetroactive}>
@@ -276,10 +286,10 @@ export const ShiftsPage = () => {
       <div className="form-grid-2"><label>Entrada<input type="datetime-local" value={retroStartAt} onChange={(event) => setRetroStartAt(event.target.value)} required /></label><label>Saída<input type="datetime-local" value={retroEndAt} onChange={(event) => setRetroEndAt(event.target.value)} required /></label></div>
       <div className="shift-model-grid">{retroDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("retroactive", draft, retroDrafts)}<div className="retro-evidence-grid">{fields("retroactive", draft, "start", "início")}{fields("retroactive", draft, "end", "fim")}</div>{hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setRetroDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}</section>)}</div>
       {retroDrafts.length < 2 && rooms.length > retroDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("retroactive")}>+ Adicionar segunda modelo</button> : null}
+      {workflowError}
       <button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Lançando…" : retroDrafts.length === 2 ? "Lançar os dois turnos" : "Lançar turno anterior"}</button>
     </form> : null}
 
-    {error ? <div className="error-box" role="alert">{error}</div> : null}
     <ModalDialog open={confirmCancel} onClose={() => !submitting && setConfirmCancel(false)} ariaLabel="Cancelar ponto aberto"><h2>Cancelar {currentShifts.length === 2 ? "os pontos" : "o ponto"}?</h2><p>Os comprovantes serão removidos e a ação ficará registrada.</p><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setConfirmCancel(false)} disabled={submitting}>Voltar</button><button className="danger-button" type="button" onClick={() => void cancelCurrentBatch()} disabled={submitting}>{submitting ? "Cancelando…" : "Confirmar cancelamento"}</button></div></ModalDialog>
   </section>;
 };

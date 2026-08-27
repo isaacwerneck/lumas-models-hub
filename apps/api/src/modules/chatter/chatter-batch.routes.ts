@@ -7,8 +7,18 @@ import { queueEvidencePurge } from "../../services/evidence-cleanup";
 import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
 import { calculatePayoutCents } from "../../utils/payout";
+import { modelRoomName } from "../chat/chat.shared";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
-import { assertNoShiftOverlap, assertOpenShiftLimit, lockShiftChatter, lockShiftModels, ShiftOverlapError } from "./shift-overlap";
+import { createShiftChatEvent } from "./shift-chat";
+import {
+  assertModelsHaveNoOpenShift,
+  assertNoShiftOverlap,
+  assertOpenShiftLimit,
+  lockShiftChatter,
+  lockShiftModels,
+  ModelOpenShiftError,
+  ShiftOverlapError
+} from "./shift-overlap";
 
 const moneyMetadataSchema = z.object({
   currency: z.enum(["BRL", "USD"]).default("BRL"),
@@ -84,10 +94,16 @@ const resolveValue = (input: ValueInput, label: string) => {
 };
 
 const ensureChatterTags = async (prisma: Prisma.TransactionClient, chatterId: string, modelTagIds: string[]) => {
+  const chatter = await prisma.user.findFirst({
+    where: { id: chatterId, role: Role.CHATTER, isActive: true, deletedAt: null },
+    select: { id: true, displayName: true, payoutPercentage: true }
+  });
+  if (!chatter) throw new BatchValidationError(403, "Chatter indisponível para novas operações.");
   const count = await prisma.chatterModelTag.count({
     where: { chatterId, modelTagId: { in: modelTagIds }, modelTag: { isActive: true } }
   });
   if (count !== modelTagIds.length) throw new BatchValidationError(403, "Você não está vinculado a uma das modelos selecionadas.");
+  return chatter;
 };
 
 const claimEvidence = async (tx: Prisma.TransactionClient, chatterId: string, evidenceId: string) => {
@@ -135,16 +151,18 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       const prepared = body.shifts.map((item) => ({ ...item, ...resolveValue(item, "Entrada") }));
       const batchId = randomUUID();
 
-      const shifts = await fastify.prisma.$transaction(async (tx) => {
+      const result = await fastify.prisma.$transaction(async (tx) => {
         const modelTagIds = prepared.map((item) => item.modelTagId);
         await lockShiftChatter(tx, authUser.sub);
         await lockShiftModels(tx, modelTagIds);
         await assertOpenShiftLimit(tx, authUser.sub, prepared.length);
-        await ensureChatterTags(tx, authUser.sub, modelTagIds);
+        const chatter = await ensureChatterTags(tx, authUser.sub, modelTagIds);
+        await assertModelsHaveNoOpenShift(tx, modelTagIds);
         for (const item of prepared) {
           await assertNoShiftOverlap(tx, { modelTagId: item.modelTagId, startedAt });
         }
         const created = [];
+        const chatMessages = [];
         for (const item of prepared) {
           await claimEvidence(tx, authUser.sub, item.evidenceId);
           const shift = await tx.shift.create({
@@ -164,13 +182,23 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
             data: { actorId: authUser.sub, action: AuditAction.SHIFT_STARTED, targetType: "Shift", targetId: shift.id,
               metadata: { batchId, modelTagId: shift.modelTagId, startValueCents: shift.startValueCents, ...requestMeta(request) } }
           });
+          chatMessages.push(await createShiftChatEvent(tx, {
+            chatterId: chatter.id,
+            chatterDisplayName: chatter.displayName,
+            modelTagId: shift.modelTagId,
+            occurredAt: startedAt,
+            event: "OPENED"
+          }));
           created.push(shift);
         }
-        return created;
+        return { shifts: created, chatMessages };
       });
+      const { shifts, chatMessages } = result;
       emitBatchUpdate(fastify, shifts.map((item) => item.id), "started");
+      for (const message of chatMessages) fastify.io.to(modelRoomName(message.modelTagId)).emit("chat:message", message);
       return reply.code(201).send({ batchId, shifts });
     } catch (error) {
+      if (error instanceof ModelOpenShiftError) return reply.code(409).send({ message: error.message, conflictingShiftId: error.conflictingShiftId });
       if (error instanceof ShiftOverlapError) return reply.code(409).send({ message: "Já existe um turno sobreposto para uma das modelos selecionadas.", conflictingShiftId: error.conflictingShiftId });
       if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ message: error.message });
       throw error;
@@ -189,7 +217,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       const shiftIds = body.shifts.map((item) => item.shiftId);
       const existing = await fastify.prisma.shift.findMany({
         where: { id: { in: shiftIds }, chatterId: authUser.sub, status: ShiftStatus.OPEN },
-        include: { chatter: { select: { payoutPercentage: true } } }
+        include: { chatter: { select: { payoutPercentage: true, displayName: true } } }
       });
       if (existing.length !== shiftIds.length) throw new BatchValidationError(404, "Um dos turnos abertos não foi encontrado.");
       const batchIds = [...new Set(existing.map((item) => item.batchId).filter((id): id is string => Boolean(id)))];
@@ -213,12 +241,19 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
         ? (await fastify.prisma.user.findMany({ where: { role: Role.MANAGER, isActive: true }, select: { id: true } })).map((item) => item.id)
         : [];
 
-      const closed = await fastify.prisma.$transaction(async (tx) => {
+      const closedResult = await fastify.prisma.$transaction(async (tx) => {
         await lockShiftModels(tx, prepared.map((item) => item.shift.modelTagId));
+        const stillOpen = await tx.shift.count({
+          where: { id: { in: shiftIds }, chatterId: authUser.sub, status: ShiftStatus.OPEN }
+        });
+        if (stillOpen !== shiftIds.length) {
+          throw new BatchValidationError(409, "Um dos pontos já foi encerrado. Atualize a página.");
+        }
         for (const item of prepared) {
           await assertNoShiftOverlap(tx, { modelTagId: item.shift.modelTagId, startedAt: item.shift.startedAt, endedAt, excludeShiftIds: shiftIds });
         }
         const results = [];
+        const chatMessages = [];
         for (const item of prepared) {
           await claimEvidence(tx, authUser.sub, item.evidenceId);
           const updated = await tx.shift.update({ where: { id: item.shift.id }, data: {
@@ -245,11 +280,20 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
               metadata: { chatterId: authUser.sub, modelTagId: updated.modelTagId, grossAmountCents: item.grossAmountCents }
             })), skipDuplicates: true });
           }
+          chatMessages.push(await createShiftChatEvent(tx, {
+            chatterId: authUser.sub,
+            chatterDisplayName: item.shift.chatter.displayName,
+            modelTagId: updated.modelTagId,
+            occurredAt: endedAt,
+            event: "CLOSED"
+          }));
           results.push(updated);
         }
-        return results;
+        return { shifts: results, chatMessages };
       });
+      const { shifts: closed, chatMessages } = closedResult;
       emitBatchUpdate(fastify, closed.map((item) => item.id), "closed");
+      for (const message of chatMessages) fastify.io.to(modelRoomName(message.modelTagId)).emit("chat:message", message);
       return { shifts: closed.map((item) => ({ ...item,
         grossAmountFormatted: item.grossAmountCents !== null ? centsToBrl(item.grossAmountCents) : null,
         payoutAmountFormatted: item.payoutAmountCents !== null ? centsToBrl(item.payoutAmountCents) : null })) };
@@ -273,8 +317,6 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       if (endedAt > new Date()) throw new BatchValidationError(400, "O encerramento do turno anterior não pode estar no futuro.");
       ensureDistinct(body.shifts.map((item) => item.modelTagId), "Selecione modelos diferentes.");
       ensureDistinct(body.shifts.flatMap((item) => [item.start.evidenceId, item.end.evidenceId]), "Cada captura precisa usar um comprovante próprio.");
-      const chatter = await fastify.prisma.user.findUnique({ where: { id: authUser.sub }, select: { payoutPercentage: true } });
-      if (!chatter) throw new BatchValidationError(404, "Chatter não encontrado.");
       const prepared = body.shifts.map((item) => {
         const start = resolveValue(item.start, `Entrada de ${item.modelTagId}`);
         const end = resolveValue(item.end, `Saída de ${item.modelTagId}`);
@@ -282,8 +324,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
         if (grossAmountCents < 0 && !item.negativeJustification?.trim()) {
           throw new BatchValidationError(400, "Saldo negativo exige uma justificativa para cada modelo afetada.");
         }
-        return { ...item, start: { ...item.start, ...start }, end: { ...item.end, ...end }, grossAmountCents,
-          payoutAmountCents: calculatePayoutCents(grossAmountCents, chatter.payoutPercentage) };
+        return { ...item, start: { ...item.start, ...start }, end: { ...item.end, ...end }, grossAmountCents };
       });
       const batchId = randomUUID();
       const managerIds = prepared.some((item) => item.grossAmountCents < 0)
@@ -291,11 +332,13 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
         : [];
       const shifts = await fastify.prisma.$transaction(async (tx) => {
         const modelTagIds = prepared.map((item) => item.modelTagId);
+        await lockShiftChatter(tx, authUser.sub);
         await lockShiftModels(tx, modelTagIds);
-        await ensureChatterTags(tx, authUser.sub, modelTagIds);
+        const chatter = await ensureChatterTags(tx, authUser.sub, modelTagIds);
         for (const item of prepared) await assertNoShiftOverlap(tx, { modelTagId: item.modelTagId, startedAt, endedAt });
         const created = [];
         for (const item of prepared) {
+          const payoutAmountCents = calculatePayoutCents(item.grossAmountCents, chatter.payoutPercentage);
           await claimEvidence(tx, authUser.sub, item.start.evidenceId);
           await claimEvidence(tx, authUser.sub, item.end.evidenceId);
           const shift = await tx.shift.create({ data: {
@@ -315,16 +358,16 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
             endFxRate: item.end.moneyMetadata?.fxRate, endFxProvider: item.end.moneyMetadata?.fxProvider,
             endFxQuotedAt: item.end.moneyMetadata?.fxQuotedAt ? new Date(item.end.moneyMetadata.fxQuotedAt) : null,
             grossAmountCents: item.grossAmountCents, commissionDivisor: null, payoutPercentage: chatter.payoutPercentage,
-            payoutAmountCents: item.payoutAmountCents,
+            payoutAmountCents,
             negativeJustification: item.grossAmountCents < 0 ? item.negativeJustification?.trim() : null
           }, include: { modelTag: { select: { id: true, name: true } } } });
-          await syncEarnings(tx, authUser.sub, shift.id, item.payoutAmountCents);
+          await syncEarnings(tx, authUser.sub, shift.id, payoutAmountCents);
           await tx.auditLog.createMany({ data: [
             { actorId: authUser.sub, action: AuditAction.SHIFT_STARTED, targetType: "Shift", targetId: shift.id,
               metadata: { batchId, retroactive: true, modelTagId: shift.modelTagId, startValueCents: shift.startValueCents, ...requestMeta(request) } },
             { actorId: authUser.sub, action: AuditAction.SHIFT_CLOSED, targetType: "Shift", targetId: shift.id,
               metadata: { batchId, retroactive: true, modelTagId: shift.modelTagId, grossAmountCents: item.grossAmountCents,
-                payoutPercentage: chatter.payoutPercentage, payoutAmountCents: item.payoutAmountCents, ...requestMeta(request) } }
+                payoutPercentage: chatter.payoutPercentage, payoutAmountCents, ...requestMeta(request) } }
           ] });
           if (item.grossAmountCents < 0) {
             await tx.notification.createMany({ data: [...new Set([authUser.sub, ...managerIds])].map((userId) => ({

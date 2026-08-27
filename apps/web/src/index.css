@@ -1770,6 +1770,46 @@ tbody tr:hover {
 
 .chatter-action-button:active { transform: translateY(0); }
 
+.chatter-name-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.chatter-name-heading h1 { min-width: 0; overflow-wrap: anywhere; }
+
+.chatter-name-edit {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-pink-light);
+  background: rgba(255, 255, 255, .045);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  transition: transform var(--motion-fast) var(--motion-ease), color var(--motion-base) var(--motion-ease), background var(--motion-base) var(--motion-ease), border-color var(--motion-base) var(--motion-ease);
+}
+
+.chatter-name-edit:hover {
+  transform: translateY(-1px);
+  color: var(--text-white);
+  background: rgba(237, 0, 178, .14);
+  border-color: color-mix(in srgb, var(--brand-magenta) 58%, var(--glass-border));
+}
+
+.manager-danger-zone {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-color: rgba(255, 108, 151, .34) !important;
+}
+
+.manager-danger-zone > div { min-width: 0; display: grid; gap: 6px; }
+.manager-danger-zone p { max-width: 68ch; color: var(--text-soft); line-height: 1.5; }
+.manager-danger-zone .danger-button { min-width: 132px; }
+.manager-delete-profile-modal p { line-height: 1.5; }
+
 .cell.name {
   font-weight: 600;
   color: var(--text-white);
@@ -1860,6 +1900,20 @@ tbody tr:hover {
 .message-item p {
   margin-top: 0.35rem;
 }
+
+.shift-event {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(12px, 1fr) auto minmax(0, auto) auto minmax(12px, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: .2rem 0;
+  color: var(--accent-gold);
+}
+
+.shift-event-rule { height: 1px; background: color-mix(in srgb, var(--accent-gold) 34%, transparent); }
+.shift-event p { min-width: 0; overflow-wrap: anywhere; color: var(--text-pink-light); font-size: .84rem; font-weight: 650; line-height: 1.4; }
+.shift-event time { color: var(--text-soft); font-size: .74rem; white-space: nowrap; }
 
 .chat-form {
   display: grid;
@@ -2246,6 +2300,9 @@ tbody tr:hover {
   background: rgba(90, 177, 138, 0.12);
 }
 
+.shift-workflow-error:focus,
+.shift-edit-error:focus { outline: 2px solid var(--accent-gold); outline-offset: 2px; }
+
 .manager-earning-status {
   display: flex;
   flex-wrap: wrap;
@@ -2387,6 +2444,7 @@ tbody tr:hover {
 .review-icon-button.is-danger:hover { color: #fff; background: rgba(220, 50, 90, .42); border-color: rgba(255, 130, 160, .7); }
 .review-icon-button:disabled { cursor: wait; opacity: .55; transform: none; }
 .shift-edit-modal { width: min(680px, 94vw); }
+.shift-edit-modal { max-height: calc(100dvh - 2rem); overflow-y: auto; }
 .modal-intro { margin: -4px 0 6px; color: var(--text-muted); }
 
 .model-workspace { min-width: 0; }
@@ -2453,6 +2511,12 @@ tbody tr:hover {
   .review-actions-cell { min-width: 0; width: 100%; }
   .review-actions { justify-content: stretch; }
   .review-confirm-button, .review-reopen-button { flex: 1; }
+  .manager-danger-zone { grid-template-columns: 1fr; }
+  .manager-danger-zone .danger-button { width: 100%; min-height: 44px; }
+  .manager-delete-profile-modal .modal-actions { display: grid; grid-template-columns: 1fr; }
+  .manager-delete-profile-modal .modal-actions .danger-button { order: -1; min-height: 44px; }
+  .shift-event { grid-template-columns: 16px minmax(0, 1fr) auto; }
+  .shift-event-rule { display: none; }
 }
 
 @media (forced-colors: active) {
@@ -2729,6 +2793,8 @@ tbody tr:hover {
 .shift-mode-switch button { min-height: 38px; padding-inline: 1rem; }
 .shift-workflow-card { gap: 16px; }
 .shift-workflow-card > .primary-button { justify-self: end; min-width: 190px; }
+.shift-close-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.shift-close-actions > button { min-width: 170px; }
 .shared-time-field { width: min(100%, 360px); }
 .shift-model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .shift-model-panel { min-width: 0; display: grid; gap: 12px; padding: 16px; border: 1px solid var(--border-color); border-radius: 14px; background: rgba(255,255,255,.025); }
@@ -2754,6 +2820,8 @@ tbody tr:hover {
   .shift-model-heading .compact-button { align-self: start; }
   .shift-workflow-card > .primary-button,
   .add-model-button { width: 100%; justify-self: stretch; }
+  .shift-close-actions { display: grid; grid-template-columns: 1fr; }
+  .shift-close-actions > button { width: 100%; min-width: 0; }
 }
 
 @media (max-width: 1000px) {
