@@ -2810,13 +2810,17 @@ tbody tr:hover {
 
 .shift-mode-switch { width: fit-content; }
 .shift-mode-switch button { min-height: 38px; padding-inline: 1rem; }
-.shift-workflow-card { gap: 16px; }
-.shift-workflow-card > .primary-button { justify-self: end; min-width: 190px; }
+.shift-workflow-card { gap: 18px; padding: clamp(16px, 2vw, 22px); }
+.shift-workflow-card > .primary-button { justify-self: end; min-width: 190px; margin-top: 2px; }
 .shift-close-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .shift-close-actions > button { min-width: 170px; }
 .shared-time-field { width: min(100%, 360px); }
 .shift-model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.shift-model-grid.is-single { grid-template-columns: minmax(0, 1fr); }
 .shift-model-panel { min-width: 0; display: grid; gap: 12px; padding: 16px; border: 1px solid var(--border-color); border-radius: 14px; background: rgba(255,255,255,.025); }
+.shift-model-grid.is-single .shift-model-panel > .shift-value-fields { grid-template-columns: minmax(320px, 1.2fr) minmax(260px, .8fr); align-items: start; gap: 18px; }
+.shift-model-grid.is-single .shift-model-panel > .shift-value-fields .dropzone { min-height: 152px; align-content: center; }
+.shift-model-grid.is-single .shift-model-panel > .shift-value-fields .money-field { align-self: center; padding: 4px 0; }
 .shift-model-heading { min-width: 0; display: flex; align-items: end; justify-content: space-between; gap: 12px; }
 .shift-model-heading > label { flex: 1; min-width: 0; }
 .shift-model-heading h3 { margin: 3px 0 0; }
@@ -2825,17 +2829,17 @@ tbody tr:hover {
 .shift-value-fields { min-width: 0; display: grid; gap: 10px; }
 .retro-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .retro-evidence-grid .dropzone { min-height: 160px; }
-.shift-time-card { display: grid; grid-template-columns: minmax(210px, .85fr) minmax(300px, 1.3fr) auto; align-items: end; gap: 16px; padding: 18px; border: 1px solid color-mix(in srgb, var(--accent-gold) 36%, var(--border-color)); border-radius: 16px; background: linear-gradient(135deg, rgba(255, 197, 90, .09), rgba(255,255,255,.025)); }
-.shift-time-card-heading { display: flex; align-items: flex-start; gap: 11px; min-width: 0; }
+.shift-time-card { display: grid; grid-template-columns: minmax(230px, .85fr) minmax(470px, 1.3fr) max-content; align-items: center; gap: 18px; padding: 16px 18px; border: 1px solid color-mix(in srgb, var(--accent-gold) 36%, var(--border-color)); border-radius: 16px; background: linear-gradient(135deg, rgba(255, 197, 90, .09), rgba(255,255,255,.025)); }
+.shift-time-card-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .shift-time-card-heading h3 { margin: 0 0 4px; font-size: 1rem; }
-.shift-time-card-heading p { color: var(--text-pink-light); font-size: .86rem; line-height: 1.4; overflow-wrap: anywhere; }
+.shift-time-card-heading p { color: var(--text-soft); font-size: .82rem; line-height: 1.4; overflow-wrap: anywhere; }
 .shift-time-icon { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; color: var(--accent-gold); border: 1px solid rgba(255, 197, 90, .34); border-radius: 12px; background: rgba(255, 197, 90, .09); }
-.shift-time-controls { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 10px; }
+.shift-time-controls { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
 .shift-time-controls label, .locked-date { min-width: 0; display: grid; gap: 6px; align-content: end; color: var(--text-pink-light); font-size: .82rem; font-weight: 700; }
-.shift-time-controls input { min-height: 46px; font-size: 1rem; font-weight: 700; color-scheme: dark; }
+.shift-time-controls input { width: 100%; min-width: 0; min-height: 46px; font-size: 1rem; font-weight: 700; color-scheme: dark; }
 .locked-date { min-height: 70px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 12px; background: rgba(0,0,0,.12); }
 .locked-date span, .locked-date small { color: var(--text-soft); font-size: .72rem; }
-.locked-date strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.locked-date strong { line-height: 1.25; overflow-wrap: anywhere; }
 .time-now-button { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: .65rem .9rem; border: 1px solid rgba(255, 197, 90, .42); border-radius: 12px; color: var(--accent-gold); background: rgba(255, 197, 90, .08); font-weight: 750; cursor: pointer; }
 .time-now-button:hover, .time-now-button:focus-visible { background: rgba(255, 197, 90, .15); outline: none; box-shadow: 0 0 0 3px rgba(255, 197, 90, .12); }
 .time-error { margin-top: -6px; }
@@ -2846,10 +2850,11 @@ tbody tr:hover {
 .load-error-state { display: grid; justify-items: start; gap: 10px; }
 .load-error-state .secondary-button { display: inline-flex; align-items: center; gap: 7px; }
 
-@media (max-width: 900px) {
+@media (max-width: 960px) {
   .shift-model-grid,
   .retro-evidence-grid { grid-template-columns: 1fr; }
   .shift-time-card { grid-template-columns: 1fr; align-items: stretch; }
+  .shift-model-grid.is-single .shift-model-panel > .shift-value-fields { grid-template-columns: 1fr; }
   .time-now-button { justify-self: start; }
 }
 

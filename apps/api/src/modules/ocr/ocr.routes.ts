@@ -3,7 +3,6 @@ import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
 import { AuditAction, NotificationType } from "@prisma/client";
 import { z } from "zod";
-import Tesseract from "tesseract.js";
 import { env } from "../../config/env";
 import {
   brlStringToCents,
@@ -12,12 +11,22 @@ import {
 } from "../../utils/currency";
 import { createNotifications } from "../notifications/notification.service";
 import { newEvidenceKey, normalizeEvidenceImage } from "../../services/storage";
+import { recognizeEvidenceImage, terminateOcrWorker, warmOcrWorker } from "../../services/ocr-engine";
 
 const querySchema = z.object({
   fallbackValue: z.string().optional()
 });
 
 const ocrRoutes: FastifyPluginAsync = async (fastify) => {
+  if (env.NODE_ENV === "production") {
+    void warmOcrWorker().catch((error) => {
+      fastify.log.warn({ err: error }, "OCR warm-up unavailable; the first request will retry");
+    });
+  }
+  fastify.addHook("onClose", async () => {
+    await terminateOcrWorker();
+  });
+
   fastify.post("/extract", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string };
     const query = querySchema.parse(request.query);
@@ -76,7 +85,7 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
     let confidence: number | null = null;
     let ocrStatus: "READY" | "NO_VALUE" | "UNAVAILABLE" = "UNAVAILABLE";
     try {
-      const result = await Tesseract.recognize(buffer, env.OCR_LANG);
+      const result = await recognizeEvidenceImage(buffer);
       rawText = result.data.text ?? "";
       confidence = Number(((result.data.confidence ?? 0) / 100).toFixed(4));
       ocrStatus = "NO_VALUE";

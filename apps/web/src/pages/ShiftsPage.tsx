@@ -322,12 +322,12 @@ export const ShiftsPage = () => {
     {mode === "live" && !currentShifts.length ? <form className="card form-grid shift-workflow-card" onSubmit={submitLiveStart} noValidate>
       <div className="section-header"><div><h2>Abrir ponto</h2><p>Uma ou duas modelos com o mesmo horário de entrada.</p></div></div>
       {!notificationsEnabled ? <div className="warning-box" role="alert">Ative as notificações em <Link to="/config">Preferências</Link> antes de abrir o ponto.</div> : null}
-      <TimeCard title="Data e horário da entrada" summary={`Hoje, ${formatBusinessDate(liveDate)}, às ${liveTime || "--:--"}`} onUseNow={() => { const value = getBusinessDateTimeParts(); setLiveTime(value.time); setTimeError(""); }}>
+      <TimeCard title="Data e horário da entrada" summary="Data de hoje e horário de Brasília" onUseNow={() => { const value = getBusinessDateTimeParts(); setLiveTime(value.time); setTimeError(""); }}>
         <div className="locked-date"><span>Data</span><strong>{formatBusinessDate(liveDate)}</strong><small>Hoje</small></div>
-        <label>Horário<input id="live-time" type="time" step="60" value={liveTime} max={now.time} onChange={(event) => { setLiveTime(event.target.value); setTimeError(""); }} aria-invalid={Boolean(timeError)} /></label>
+        <label>Horário<input id="live-time" lang="pt-BR" type="time" step="60" value={liveTime} max={now.time} onChange={(event) => { setLiveTime(event.target.value); setTimeError(""); }} aria-invalid={Boolean(timeError)} /></label>
       </TimeCard>
       {timeError ? <p className="field-error time-error" role="alert">{timeError}</p> : null}
-      <div className="shift-model-grid">{liveDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("live", draft, liveDrafts)}{fields("live", draft, "start", "início")}</section>)}</div>
+      <div className={`shift-model-grid${liveDrafts.length === 1 ? " is-single" : ""}`}>{liveDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("live", draft, liveDrafts)}{fields("live", draft, "start", "início")}</section>)}</div>
       {liveDrafts.length < 2 && rooms.length > liveDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("live")}>+ Adicionar segunda modelo</button> : null}
       {formError}
       <button className="primary-button" type="submit" disabled={submitting || anyUploading || !notificationsEnabled}>{submitting ? "Abrindo…" : liveDrafts.length === 2 ? "Abrir os dois pontos" : "Abrir ponto"}</button>
@@ -341,12 +341,12 @@ export const ShiftsPage = () => {
 
     {mode === "live" && currentShifts.length && !expiredOpenShift ? <form className="card form-grid shift-workflow-card" onSubmit={submitClose} noValidate>
       <div className="section-header"><div><h2>Encerrar turno</h2><p>{currentShifts.length === 2 ? "As duas modelos serão encerradas juntas." : `Ponto aberto em ${currentShifts[0].modelTag.name}.`}</p></div></div>
-      <TimeCard title="Data e horário da saída" summary={`Entrada às ${currentStarted?.time} • saída às ${closeTime || "--:--"}`} onUseNow={() => { setCloseTime(getBusinessDateTimeParts().time); setTimeError(""); }}>
+      <TimeCard title="Data e horário da saída" summary={`Entrada registrada às ${currentStarted?.time}`} onUseNow={() => { setCloseTime(getBusinessDateTimeParts().time); setTimeError(""); }}>
         <div className="locked-date"><span>Data</span><strong>{formatBusinessDate(currentStarted!.date)}</strong><small>Mesmo dia da entrada</small></div>
-        <label>Horário de saída<input id="close-time" type="time" step="60" min={currentStarted?.time} max={now.time} value={closeTime} onChange={(event) => { setCloseTime(event.target.value); setTimeError(""); }} aria-invalid={Boolean(timeError)} /></label>
+        <label>Horário de saída<input id="close-time" lang="pt-BR" type="time" step="60" min={currentStarted?.time} max={now.time} value={closeTime} onChange={(event) => { setCloseTime(event.target.value); setTimeError(""); }} aria-invalid={Boolean(timeError)} /></label>
       </TimeCard>
       {timeError ? <p className="field-error time-error" role="alert">{timeError}</p> : null}
-      <div className="shift-model-grid">{closingDrafts.map((draft, index) => <section className="shift-model-panel" key={draft.key}>
+      <div className={`shift-model-grid${closingDrafts.length === 1 ? " is-single" : ""}`}>{closingDrafts.map((draft, index) => <section className="shift-model-panel" key={draft.key}>
         <div className="shift-model-heading"><div><span className="field-hint">Modelo</span><h3>{draft.shift.modelTag.name}</h3></div><span className="status-badge open">Em aberto</span></div>
         {fields("closing", draft, "end", "fim")}
         {closeMph[index] !== null ? <div className={`mph-chip ${closeMph[index]! < 0 ? "mph-negative" : ""}`}><span>MPH estimado</span><strong>{formatBrl(closeMph[index]!)}/h</strong></div> : null}
@@ -358,13 +358,13 @@ export const ShiftsPage = () => {
 
     {mode === "retroactive" ? <form className="card form-grid shift-workflow-card" onSubmit={submitRetroactive} noValidate>
       <div className="section-header"><div><h2>Lançar turno anterior</h2><p>Escolha uma data única para a entrada e a saída.</p></div></div>
-      <TimeCard title="Data e período do turno" summary={`${retroDate ? formatBusinessDate(retroDate) : "Escolha a data"} • ${retroStartTime || "--:--"} até ${retroEndTime || "--:--"}`} onUseNow={() => { const value = getBusinessDateTimeParts(); setRetroDate(value.date); setRetroEndTime(value.time); setTimeError(""); }}>
-        <label>Data<input id="retro-date" type="date" value={retroDate} max={now.date} onChange={(event) => { setRetroDate(event.target.value); setTimeError(""); }} /></label>
-        <label>Entrada<input id="retro-start-time" type="time" step="60" value={retroStartTime} onChange={(event) => { setRetroStartTime(event.target.value); setTimeError(""); }} /></label>
-        <label>Saída<input id="retro-end-time" type="time" step="60" value={retroEndTime} onChange={(event) => { setRetroEndTime(event.target.value); setTimeError(""); }} /></label>
+      <TimeCard title="Data e período do turno" summary="Entrada e saída sempre no mesmo dia" onUseNow={() => { const value = getBusinessDateTimeParts(); setRetroDate(value.date); setRetroEndTime(value.time); setTimeError(""); }}>
+        <label>Data<input id="retro-date" lang="pt-BR" type="date" value={retroDate} max={now.date} onChange={(event) => { setRetroDate(event.target.value); setTimeError(""); }} /></label>
+        <label>Entrada<input id="retro-start-time" lang="pt-BR" type="time" step="60" value={retroStartTime} onChange={(event) => { setRetroStartTime(event.target.value); setTimeError(""); }} /></label>
+        <label>Saída<input id="retro-end-time" lang="pt-BR" type="time" step="60" value={retroEndTime} onChange={(event) => { setRetroEndTime(event.target.value); setTimeError(""); }} /></label>
       </TimeCard>
       {timeError ? <p className="field-error time-error" role="alert">{timeError}</p> : null}
-      <div className="shift-model-grid">{retroDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("retroactive", draft, retroDrafts)}<div className="retro-evidence-grid">{fields("retroactive", draft, "start", "início")}{fields("retroactive", draft, "end", "fim")}</div>{hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setRetroDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}</section>)}</div>
+      <div className={`shift-model-grid${retroDrafts.length === 1 ? " is-single" : ""}`}>{retroDrafts.map((draft) => <section className="shift-model-panel" key={draft.key}>{modelSelector("retroactive", draft, retroDrafts)}<div className="retro-evidence-grid">{fields("retroactive", draft, "start", "início")}{fields("retroactive", draft, "end", "fim")}</div>{hasNegativeBalance(draft) ? <label>Justificativa para saldo negativo<textarea value={draft.negativeJustification} maxLength={500} required onChange={(event) => setRetroDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, negativeJustification: event.target.value } : item))} /></label> : null}</section>)}</div>
       {retroDrafts.length < 2 && rooms.length > retroDrafts.length ? <button type="button" className="secondary-button add-model-button" onClick={() => addModel("retroactive")}>+ Adicionar segunda modelo</button> : null}
       {formError}
       <button className="primary-button" type="submit" disabled={submitting || anyUploading}>{submitting ? "Lançando…" : retroDrafts.length === 2 ? "Lançar os dois turnos" : "Lançar turno anterior"}</button>

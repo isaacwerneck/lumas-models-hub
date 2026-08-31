@@ -72,7 +72,7 @@ export const ImageDropzone = ({ id, title, fileName, status, error, advisory, on
       {fileName ? <span className="dz-file">{fileName}</span> : null}
       <span className="dz-hint">
         {status === "uploading"
-          ? "Enviando imagem…"
+          ? "Enviando e lendo o valor…"
           : status === "error"
             ? "Falha no envio — clique para tentar novamente"
             : status === "ready"
