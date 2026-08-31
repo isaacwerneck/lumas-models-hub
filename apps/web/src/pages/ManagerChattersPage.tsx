@@ -43,8 +43,7 @@ export const ManagerChattersPage = () => {
     if (section !== "team") return;
     void loadChatters()
       .catch((requestError: unknown) => {
-        const apiError = requestError as { response?: { data?: { message?: string } } };
-        setError(apiError?.response?.data?.message ?? "Erro ao carregar chatters.");
+        setError(getApiErrorMessage(requestError, "Erro ao carregar chatters."));
       })
       .finally(() => setLoading(false));
   }, [debouncedSearch, page, section]);

@@ -250,12 +250,17 @@ model ChatMessage {
   senderId         String
   content          String
   kind             String   @default("USER")
+  shiftId          String?
+  eventType        String?
+  occurredAt       DateTime?
   createdAt        DateTime @default(now())
 
   modelTag         ModelTag @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
   sender           User     @relation("MessageSender", fields: [senderId], references: [id], onDelete: Restrict)
 
   @@index([modelTagId, createdAt])
+  @@index([modelTagId, occurredAt])
+  @@unique([shiftId, eventType])
 }
 
 model RefreshSession {

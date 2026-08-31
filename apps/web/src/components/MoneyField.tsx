@@ -11,6 +11,8 @@ type MoneyFieldProps = {
   onCurrencyChange: (currency: MoneyCurrency) => void;
   confidence: number | null;
   reading?: boolean;
+  inputId?: string;
+  error?: string | null;
 };
 
 export const MoneyField = ({
@@ -19,7 +21,9 @@ export const MoneyField = ({
   currency,
   onCurrencyChange,
   confidence,
-  reading = false
+  reading = false,
+  inputId,
+  error
 }: MoneyFieldProps) => {
   const [fxRate, setFxRate] = useState<number | null>(null);
 
@@ -30,7 +34,7 @@ export const MoneyField = ({
     const response = await api.get<FxRateResponse>("/fx/usd-brl");
     const rate = Number(response.data.rate);
     if (!Number.isFinite(rate) || rate <= 0) {
-      throw new Error("Cotacao USD/BRL invalida no momento.");
+      throw new Error("Cotação USD/BRL inválida no momento.");
     }
     setFxRate(rate);
     return rate;
@@ -43,7 +47,7 @@ export const MoneyField = ({
 
     const timer = window.setTimeout(() => {
       loadFxRate().catch(() => {
-        // cotacao indisponivel: apenas nao exibe o preview
+        // Cotação indisponível: apenas não exibe o preview.
       });
     }, 450);
 
@@ -53,7 +57,7 @@ export const MoneyField = ({
   const usdValue = currency === "USD" ? parseMoneyInput(value) : null;
   const preview =
     usdValue !== null && fxRate !== null
-      ? `${formatBrl(usdValue * fxRate)} (cotacao ${fxRate.toFixed(4)})`
+      ? `${formatBrl(usdValue * fxRate)} (cotação ${fxRate.toFixed(4)})`
       : null;
 
   const confidencePct = confidence !== null ? Math.round(confidence * 100) : null;
@@ -85,18 +89,23 @@ export const MoneyField = ({
 
       <div className="field-row">
         <input
+          id={inputId}
           value={value}
           onChange={(event) => onValueChange(event.target.value)}
           placeholder={currency === "BRL" ? "R$ 1.234,56" : "ex: 250.00"}
           inputMode="decimal"
           autoComplete="off"
           aria-label="Valor do faturamento"
+          aria-invalid={Boolean(error)}
+          aria-describedby={error && inputId ? `${inputId}-error` : undefined}
         />
         {reading ? <span className="ocr-chip">Lendo OCR…</span> : null}
         {!reading && confidencePct !== null ? (
           <span className={`ocr-chip ${lowConfidence ? "ocr-warning" : ""}`}>OCR {confidencePct}%</span>
         ) : null}
       </div>
+
+      {error ? <small id={inputId ? `${inputId}-error` : undefined} className="field-error" role="alert">{error}</small> : null}
 
       {lowConfidence ? (
         <small className="ocr-warning-hint">

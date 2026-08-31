@@ -17,7 +17,7 @@ const fxRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
       if (!response.ok) {
-        return reply.code(502).send({ message: "Falha ao obter cotacao USD/BRL." });
+        return reply.code(502).send({ message: "Falha ao obter cotação USD/BRL." });
       }
 
       const data = (await response.json()) as {
@@ -26,7 +26,7 @@ const fxRoutes: FastifyPluginAsync = async (fastify) => {
 
       const bid = Number(data.USDBRL?.bid ?? "");
       if (!Number.isFinite(bid) || bid <= 0) {
-        return reply.code(502).send({ message: "Resposta de cotacao invalida." });
+        return reply.code(502).send({ message: "Resposta de cotação inválida." });
       }
 
       const quotedAt = new Date().toISOString();
@@ -40,7 +40,7 @@ const fxRoutes: FastifyPluginAsync = async (fastify) => {
         cached: false
       };
     } catch {
-      return reply.code(502).send({ message: "Nao foi possivel consultar a cotacao USD/BRL." });
+      return reply.code(502).send({ message: "Não foi possível consultar a cotação USD/BRL." });
     } finally {
       clearTimeout(timeout);
     }

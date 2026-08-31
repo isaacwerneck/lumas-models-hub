@@ -7,6 +7,7 @@ import { queueEvidencePurge } from "../../services/evidence-cleanup";
 import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
 import { calculatePayoutCents } from "../../utils/payout";
+import { businessDateKey, isSameBusinessDate, parseBusinessLocalDateTime } from "../../utils/time";
 import { modelRoomName } from "../chat/chat.shared";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { createShiftChatEvent } from "./shift-chat";
@@ -39,12 +40,16 @@ const valueSchema = z.object({
 
 const startBatchSchema = z.object({
   startedAt: z.string().datetime().optional(),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  startedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   notificationsEnabled: z.boolean().default(false),
   shifts: z.array(valueSchema.extend({ modelTagId: z.string().min(1) })).min(1).max(2)
 });
 
 const endBatchSchema = z.object({
   endedAt: z.string().datetime().optional(),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  endedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   shifts: z.array(valueSchema.extend({
     shiftId: z.string().min(1),
     negativeJustification: z.string().max(500).optional()
@@ -52,8 +57,11 @@ const endBatchSchema = z.object({
 });
 
 const retroactiveBatchSchema = z.object({
-  startedAt: z.string().datetime(),
-  endedAt: z.string().datetime(),
+  startedAt: z.string().datetime().optional(),
+  endedAt: z.string().datetime().optional(),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  startedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  endedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   shifts: z.array(z.object({
     modelTagId: z.string().min(1),
     start: valueSchema,
@@ -67,10 +75,32 @@ const batchParamsSchema = z.object({ batchId: z.string().uuid() });
 type ValueInput = z.infer<typeof valueSchema>;
 
 class BatchValidationError extends Error {
-  constructor(public readonly statusCode: number, message: string) {
+  constructor(public readonly statusCode: number, message: string, public readonly code = "BAD_REQUEST") {
     super(message);
   }
 }
+
+const resolveLocalDateTime = (input: {
+  businessDate?: string;
+  time?: string;
+  iso?: string;
+  fallback?: Date;
+  label: string;
+}) => {
+  if (input.businessDate || input.time) {
+    if (!input.businessDate || !input.time) {
+      throw new BatchValidationError(400, `Preencha a data e o horário de ${input.label}.`, "SHIFT_DATE_TIME_REQUIRED");
+    }
+    const parsed = parseBusinessLocalDateTime(input.businessDate, input.time);
+    if (!parsed) throw new BatchValidationError(400, `Data ou horário de ${input.label} inválido.`, "SHIFT_DATE_TIME_INVALID");
+    return parsed;
+  }
+  const parsed = input.iso ? new Date(input.iso) : input.fallback;
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    throw new BatchValidationError(400, `Data ou horário de ${input.label} inválido.`, "SHIFT_DATE_TIME_INVALID");
+  }
+  return parsed;
+};
 
 const ensureDistinct = (values: string[], message: string) => {
   if (new Set(values).size !== values.length) throw new BatchValidationError(400, message);
@@ -146,8 +176,12 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       }
       ensureDistinct(body.shifts.map((item) => item.modelTagId), "Selecione modelos diferentes.");
       ensureDistinct(body.shifts.map((item) => item.evidenceId), "Cada modelo precisa de um comprovante próprio.");
-      const startedAt = body.startedAt ? new Date(body.startedAt) : new Date();
-      if (Number.isNaN(startedAt.getTime())) throw new BatchValidationError(400, "Data/hora de início inválida.");
+      const now = new Date();
+      const startedAt = resolveLocalDateTime({ businessDate: body.businessDate, time: body.startedTime, iso: body.startedAt, fallback: now, label: "entrada" });
+      if (businessDateKey(startedAt) !== businessDateKey(now)) {
+        throw new BatchValidationError(400, "O ponto atual só pode ser aberto na data de hoje.", "SHIFT_START_TODAY_ONLY");
+      }
+      if (startedAt > now) throw new BatchValidationError(400, "O horário de entrada não pode estar no futuro.", "SHIFT_TIME_IN_FUTURE");
       const prepared = body.shifts.map((item) => ({ ...item, ...resolveValue(item, "Entrada") }));
       const batchId = randomUUID();
 
@@ -186,6 +220,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
             chatterId: chatter.id,
             chatterDisplayName: chatter.displayName,
             modelTagId: shift.modelTagId,
+            shiftId: shift.id,
             occurredAt: startedAt,
             event: "OPENED"
           }));
@@ -200,7 +235,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       if (error instanceof ModelOpenShiftError) return reply.code(409).send({ message: error.message, conflictingShiftId: error.conflictingShiftId });
       if (error instanceof ShiftOverlapError) return reply.code(409).send({ message: "Já existe um turno sobreposto para uma das modelos selecionadas.", conflictingShiftId: error.conflictingShiftId });
-      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ message: error.message });
+      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ code: error.code, message: error.message });
       throw error;
     }
   });
@@ -212,14 +247,17 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       const body = endBatchSchema.parse(request.body);
       ensureDistinct(body.shifts.map((item) => item.shiftId), "Um turno foi enviado mais de uma vez.");
       ensureDistinct(body.shifts.map((item) => item.evidenceId), "Cada modelo precisa de um comprovante próprio.");
-      const endedAt = body.endedAt ? new Date(body.endedAt) : new Date();
-      if (Number.isNaN(endedAt.getTime())) throw new BatchValidationError(400, "Data/hora final inválida.");
       const shiftIds = body.shifts.map((item) => item.shiftId);
       const existing = await fastify.prisma.shift.findMany({
         where: { id: { in: shiftIds }, chatterId: authUser.sub, status: ShiftStatus.OPEN },
         include: { chatter: { select: { payoutPercentage: true, displayName: true } } }
       });
       if (existing.length !== shiftIds.length) throw new BatchValidationError(404, "Um dos turnos abertos não foi encontrado.");
+      const endedAt = resolveLocalDateTime({ businessDate: body.businessDate, time: body.endedTime, iso: body.endedAt, fallback: new Date(), label: "saída" });
+      if (endedAt > new Date()) throw new BatchValidationError(400, "O horário de saída não pode estar no futuro.", "SHIFT_TIME_IN_FUTURE");
+      if (existing.some((shift) => !isSameBusinessDate(shift.startedAt, endedAt))) {
+        throw new BatchValidationError(409, "Este ponto ficou aberto em outro dia. Cancele-o e lance o período correto como turno anterior.", "SHIFT_EXPIRED_OPEN");
+      }
       const batchIds = [...new Set(existing.map((item) => item.batchId).filter((id): id is string => Boolean(id)))];
       if (batchIds.length === 1) {
         const openInBatch = await fastify.prisma.shift.count({ where: { batchId: batchIds[0], chatterId: authUser.sub, status: ShiftStatus.OPEN } });
@@ -284,6 +322,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
             chatterId: authUser.sub,
             chatterDisplayName: item.shift.chatter.displayName,
             modelTagId: updated.modelTagId,
+            shiftId: updated.id,
             occurredAt: endedAt,
             event: "CLOSED"
           }));
@@ -299,7 +338,7 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
         payoutAmountFormatted: item.payoutAmountCents !== null ? centsToBrl(item.payoutAmountCents) : null })) };
     } catch (error) {
       if (error instanceof ShiftOverlapError) return reply.code(409).send({ message: "O período informado se sobrepõe a outro turno da mesma modelo.", conflictingShiftId: error.conflictingShiftId });
-      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ message: error.message });
+      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ code: error.code, message: error.message });
       throw error;
     }
   });
@@ -309,10 +348,13 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
     if (authUser.role !== Role.CHATTER) return reply.code(403).send({ message: "Acesso restrito a chatters." });
     try {
       const body = retroactiveBatchSchema.parse(request.body);
-      const startedAt = new Date(body.startedAt);
-      const endedAt = new Date(body.endedAt);
-      if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime()) || endedAt <= startedAt) {
+      const startedAt = resolveLocalDateTime({ businessDate: body.businessDate, time: body.startedTime, iso: body.startedAt, label: "entrada" });
+      const endedAt = resolveLocalDateTime({ businessDate: body.businessDate, time: body.endedTime, iso: body.endedAt, label: "saída" });
+      if (endedAt <= startedAt) {
         throw new BatchValidationError(400, "Informe um período anterior válido, com a saída depois da entrada.");
+      }
+      if (!isSameBusinessDate(startedAt, endedAt)) {
+        throw new BatchValidationError(400, "A entrada e a saída precisam acontecer no mesmo dia.", "SHIFT_CROSS_DAY");
       }
       if (endedAt > new Date()) throw new BatchValidationError(400, "O encerramento do turno anterior não pode estar no futuro.");
       ensureDistinct(body.shifts.map((item) => item.modelTagId), "Selecione modelos diferentes.");
@@ -330,13 +372,14 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
       const managerIds = prepared.some((item) => item.grossAmountCents < 0)
         ? (await fastify.prisma.user.findMany({ where: { role: Role.MANAGER, isActive: true }, select: { id: true } })).map((item) => item.id)
         : [];
-      const shifts = await fastify.prisma.$transaction(async (tx) => {
+      const result = await fastify.prisma.$transaction(async (tx) => {
         const modelTagIds = prepared.map((item) => item.modelTagId);
         await lockShiftChatter(tx, authUser.sub);
         await lockShiftModels(tx, modelTagIds);
         const chatter = await ensureChatterTags(tx, authUser.sub, modelTagIds);
         for (const item of prepared) await assertNoShiftOverlap(tx, { modelTagId: item.modelTagId, startedAt, endedAt });
         const created = [];
+        const chatMessages = [];
         for (const item of prepared) {
           const payoutAmountCents = calculatePayoutCents(item.grossAmountCents, chatter.payoutPercentage);
           await claimEvidence(tx, authUser.sub, item.start.evidenceId);
@@ -369,6 +412,14 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
               metadata: { batchId, retroactive: true, modelTagId: shift.modelTagId, grossAmountCents: item.grossAmountCents,
                 payoutPercentage: chatter.payoutPercentage, payoutAmountCents, ...requestMeta(request) } }
           ] });
+          chatMessages.push(await createShiftChatEvent(tx, {
+            chatterId: chatter.id, chatterDisplayName: chatter.displayName, modelTagId: shift.modelTagId,
+            shiftId: shift.id, occurredAt: startedAt, event: "OPENED"
+          }));
+          chatMessages.push(await createShiftChatEvent(tx, {
+            chatterId: chatter.id, chatterDisplayName: chatter.displayName, modelTagId: shift.modelTagId,
+            shiftId: shift.id, occurredAt: endedAt, event: "CLOSED"
+          }));
           if (item.grossAmountCents < 0) {
             await tx.notification.createMany({ data: [...new Set([authUser.sub, ...managerIds])].map((userId) => ({
               userId, type: NotificationType.NEGATIVE_SHIFT, title: "Turno com saldo negativo",
@@ -378,13 +429,15 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
           }
           created.push(shift);
         }
-        return created;
+        return { shifts: created, chatMessages };
       });
+      const { shifts, chatMessages } = result;
       emitBatchUpdate(fastify, shifts.map((item) => item.id), "created-retroactive");
+      for (const message of chatMessages) fastify.io.to(modelRoomName(message.modelTagId)).emit("chat:message", message);
       return reply.code(201).send({ batchId, shifts });
     } catch (error) {
       if (error instanceof ShiftOverlapError) return reply.code(409).send({ message: "O período informado se sobrepõe a outro turno da mesma modelo.", conflictingShiftId: error.conflictingShiftId });
-      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ message: error.message });
+      if (error instanceof BatchValidationError) return reply.code(error.statusCode).send({ code: error.code, message: error.message });
       throw error;
     }
   });
@@ -395,18 +448,28 @@ const chatterBatchRoutes: FastifyPluginAsync = async (fastify) => {
     const { batchId } = batchParamsSchema.parse(request.params);
     const shifts = await fastify.prisma.shift.findMany({
       where: { batchId, chatterId: authUser.sub, status: ShiftStatus.OPEN },
-      include: { earnings: true }
+      include: { earnings: true, chatter: { select: { id: true, displayName: true } } }
     });
     if (!shifts.length) return reply.code(404).send({ message: "Lote de turnos abertos não encontrado." });
     if (shifts.some((item) => item.earnings?.status === EarningsStatus.PAID)) return reply.code(409).send({ message: "Turno pago não pode ser apagado." });
     const evidenceIds = shifts.flatMap((item) => [item.startEvidenceId, item.endEvidenceId]).filter((id): id is string => Boolean(id));
-    await fastify.prisma.$transaction(async (tx) => {
+    const cancelledAt = new Date();
+    const chatMessages = await fastify.prisma.$transaction(async (tx) => {
+      const messages = [];
+      for (const shift of shifts) {
+        messages.push(await createShiftChatEvent(tx, {
+          chatterId: shift.chatter.id, chatterDisplayName: shift.chatter.displayName, modelTagId: shift.modelTagId,
+          shiftId: shift.id, occurredAt: cancelledAt, event: "CANCELLED"
+        }));
+      }
       await queueEvidencePurge(tx, evidenceIds);
       await tx.shift.deleteMany({ where: { id: { in: shifts.map((item) => item.id) } } });
       await tx.auditLog.createMany({ data: shifts.map((item) => ({ actorId: authUser.sub, action: AuditAction.SHIFT_DELETED,
         targetType: "Shift", targetId: item.id, metadata: { batchId, modelTagId: item.modelTagId, status: item.status, ...requestMeta(request) } })) });
+      return messages;
     });
     emitBatchUpdate(fastify, shifts.map((item) => item.id), "deleted");
+    for (const message of chatMessages) fastify.io.to(modelRoomName(message.modelTagId)).emit("chat:message", message);
     return { success: true };
   });
 };

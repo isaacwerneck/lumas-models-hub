@@ -18,8 +18,8 @@ describe("ToastProvider", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Sucesso" }));
     fireEvent.click(screen.getByRole("button", { name: "Erro" }));
-    expect(screen.getByText("Alteração salva")).toHaveClass("toast-success");
-    expect(screen.getByText("Não foi possível salvar")).toHaveClass("toast-error");
+    expect(screen.getByText("Alteração salva").closest(".toast")).toHaveClass("toast-success");
+    expect(screen.getByText("Não foi possível salvar").closest(".toast")).toHaveClass("toast-error");
 
     await waitFor(() => expect(screen.queryByText("Alteração salva")).not.toBeInTheDocument());
     expect(screen.queryByText("Não foi possível salvar")).not.toBeInTheDocument();

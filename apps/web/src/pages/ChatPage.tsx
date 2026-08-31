@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { io, Socket } from "socket.io-client";
 import { Clock3 } from "lucide-react";
 import { api, getAccessToken } from "../lib/api";
 import { SOCKET_URL } from "../lib/runtime";
-import { formatTime } from "../lib/dateTime";
+import { formatDateTime, formatTime } from "../lib/dateTime";
 import { getApiErrorMessage } from "../lib/apiError";
 import type { ChatRoom } from "../types";
 
@@ -14,6 +14,9 @@ type ChatMessage = {
   createdAt: string;
   modelTagId: string;
   kind?: "USER" | "SHIFT_EVENT";
+  shiftId?: string | null;
+  eventType?: "OPENED" | "CLOSED" | "CANCELLED" | null;
+  occurredAt?: string | null;
   sender?: {
     id: string;
     displayName: string;
@@ -101,13 +104,19 @@ export const ChatPage = () => {
     } finally { setLoadingRooms(false); }
   };
 
-  const loadMessages = async (targetRoomId: string) => {
-    setLoadingMessages(true);
+  const loadMessages = useCallback(async (targetRoomId: string, silent = false) => {
+    if (!silent) setLoadingMessages(true);
     try {
       const response = await api.get(`/chat/rooms/${targetRoomId}/messages`);
-      setMessages(response.data.messages);
-    } finally { setLoadingMessages(false); }
-  };
+      const incoming = response.data.messages as ChatMessage[];
+      setMessages((current) => {
+        if (!silent) return incoming;
+        const merged = new Map(current.map((item) => [item.id, item]));
+        for (const item of incoming) merged.set(item.id, item);
+        return [...merged.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+      });
+    } finally { if (!silent) setLoadingMessages(false); }
+  }, []);
 
   useEffect(() => {
     void loadRooms();
@@ -118,7 +127,21 @@ export const ChatPage = () => {
       return;
     }
     void loadMessages(roomId);
-  }, [roomId]);
+  }, [roomId, loadMessages]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void loadMessages(roomId, true);
+    };
+    const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [roomId, loadMessages]);
 
   useEffect(() => {
     if (!socket) {
@@ -127,7 +150,9 @@ export const ChatPage = () => {
 
     const onMessage = (message: ChatMessage) => {
       if (message.modelTagId === roomId) {
-        setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
+        setMessages((current) => current.some((item) => item.id === message.id)
+          ? current
+          : [...current, message].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)));
       }
     };
 
@@ -167,7 +192,7 @@ export const ChatPage = () => {
 
       setContent("");
     } catch (requestError: unknown) {
-      setError(getApiErrorMessage(requestError, "Nao foi possivel enviar a mensagem."));
+      setError(getApiErrorMessage(requestError, "Não foi possível enviar a mensagem."));
     }
   };
 
@@ -207,11 +232,12 @@ export const ChatPage = () => {
         <div className="messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da sala">
           {loadingMessages ? <div className="skeleton-list"><div className="skeleton" /><div className="skeleton" /></div> : null}
           {messages.map((message) => message.kind === "SHIFT_EVENT" ? (
-            <div key={message.id} className="shift-event">
+            <div key={message.id} className={`shift-event ${message.eventType ? `is-${message.eventType.toLowerCase()}` : "is-legacy"}`}>
               <span className="shift-event-rule" aria-hidden="true" />
               <Clock3 size={16} aria-hidden="true" />
-              <p>{message.content}</p>
-              <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+              <p>{message.eventType ? message.content.replace(/\s+às\s+\d{2}:\d{2}h?\.$/, "") : message.content}</p>
+              {message.eventType ? <span className="shift-event-badge">{message.eventType === "OPENED" ? "Entrada" : message.eventType === "CLOSED" ? "Saída" : "Cancelado"}</span> : null}
+              <time dateTime={message.occurredAt ?? message.createdAt}>{message.occurredAt ? formatDateTime(message.occurredAt) : formatTime(message.createdAt)}</time>
               <span className="shift-event-rule" aria-hidden="true" />
             </div>
           ) : (

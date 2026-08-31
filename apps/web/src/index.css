@@ -944,6 +944,12 @@ a:focus-visible {
   font-weight: 500;
 }
 
+.dropzone.is-ready { border-style: solid; border-color: rgba(65, 210, 155, .58); background: rgba(65, 210, 155, .055); }
+.dropzone.has-error { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.dropzone .dz-feedback { max-width: 100%; color: var(--accent-gold); font-size: .76rem; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.dropzone .dz-feedback.error { color: #ff9fbd; }
+.field-error { display: block; color: #ff9fbd; font-size: .8rem; font-weight: 650; line-height: 1.4; }
+
 .card h2 {
   flex-wrap: wrap;
 }
@@ -1904,7 +1910,7 @@ tbody tr:hover {
 .shift-event {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(12px, 1fr) auto minmax(0, auto) auto minmax(12px, 1fr);
+  grid-template-columns: minmax(12px, 1fr) auto minmax(0, auto) auto auto minmax(12px, 1fr);
   align-items: center;
   gap: 8px;
   padding: .2rem 0;
@@ -1914,6 +1920,11 @@ tbody tr:hover {
 .shift-event-rule { height: 1px; background: color-mix(in srgb, var(--accent-gold) 34%, transparent); }
 .shift-event p { min-width: 0; overflow-wrap: anywhere; color: var(--text-pink-light); font-size: .84rem; font-weight: 650; line-height: 1.4; }
 .shift-event time { color: var(--text-soft); font-size: .74rem; white-space: nowrap; }
+.shift-event-badge { padding: .2rem .48rem; border: 1px solid currentColor; border-radius: 999px; color: var(--accent-gold); font-size: .66rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.shift-event.is-closed { color: #70dcb0; }
+.shift-event.is-closed .shift-event-badge { color: #70dcb0; }
+.shift-event.is-cancelled { color: #ff9fbd; }
+.shift-event.is-cancelled .shift-event-badge { color: #ff9fbd; }
 
 .chat-form {
   display: grid;
@@ -1976,14 +1987,20 @@ tbody tr:hover {
 }
 
 .toast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: .75rem;
   padding: 0.85rem 1rem;
   border-radius: 12px;
   font-size: 0.9rem;
   color: #fff;
   box-shadow: var(--shadow-card);
-  cursor: pointer;
   will-change: transform, opacity;
 }
+.toast span { min-width: 0; overflow-wrap: anywhere; }
+.toast-dismiss { width: 28px; height: 28px; display: grid; place-items: center; margin: -.3rem -.35rem -.3rem 0; border: 0; border-radius: 8px; color: inherit; background: rgba(255,255,255,.12); font-size: 1.15rem; cursor: pointer; }
+.toast-dismiss:hover, .toast-dismiss:focus-visible { background: rgba(255,255,255,.22); outline: 2px solid currentColor; outline-offset: 2px; }
 
 .toast-success {
   background: #246f4b;
@@ -2515,8 +2532,10 @@ tbody tr:hover {
   .manager-danger-zone .danger-button { width: 100%; min-height: 44px; }
   .manager-delete-profile-modal .modal-actions { display: grid; grid-template-columns: 1fr; }
   .manager-delete-profile-modal .modal-actions .danger-button { order: -1; min-height: 44px; }
-  .shift-event { grid-template-columns: 16px minmax(0, 1fr) auto; }
+  .shift-event { grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; }
   .shift-event-rule { display: none; }
+  .shift-event-badge { grid-column: 2; justify-self: start; }
+  .shift-event time { grid-column: 3; grid-row: 1; }
 }
 
 @media (forced-colors: active) {
@@ -2806,10 +2825,32 @@ tbody tr:hover {
 .shift-value-fields { min-width: 0; display: grid; gap: 10px; }
 .retro-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .retro-evidence-grid .dropzone { min-height: 160px; }
+.shift-time-card { display: grid; grid-template-columns: minmax(210px, .85fr) minmax(300px, 1.3fr) auto; align-items: end; gap: 16px; padding: 18px; border: 1px solid color-mix(in srgb, var(--accent-gold) 36%, var(--border-color)); border-radius: 16px; background: linear-gradient(135deg, rgba(255, 197, 90, .09), rgba(255,255,255,.025)); }
+.shift-time-card-heading { display: flex; align-items: flex-start; gap: 11px; min-width: 0; }
+.shift-time-card-heading h3 { margin: 0 0 4px; font-size: 1rem; }
+.shift-time-card-heading p { color: var(--text-pink-light); font-size: .86rem; line-height: 1.4; overflow-wrap: anywhere; }
+.shift-time-icon { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; color: var(--accent-gold); border: 1px solid rgba(255, 197, 90, .34); border-radius: 12px; background: rgba(255, 197, 90, .09); }
+.shift-time-controls { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 10px; }
+.shift-time-controls label, .locked-date { min-width: 0; display: grid; gap: 6px; align-content: end; color: var(--text-pink-light); font-size: .82rem; font-weight: 700; }
+.shift-time-controls input { min-height: 46px; font-size: 1rem; font-weight: 700; color-scheme: dark; }
+.locked-date { min-height: 70px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 12px; background: rgba(0,0,0,.12); }
+.locked-date span, .locked-date small { color: var(--text-soft); font-size: .72rem; }
+.locked-date strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.time-now-button { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: .65rem .9rem; border: 1px solid rgba(255, 197, 90, .42); border-radius: 12px; color: var(--accent-gold); background: rgba(255, 197, 90, .08); font-weight: 750; cursor: pointer; }
+.time-now-button:hover, .time-now-button:focus-visible { background: rgba(255, 197, 90, .15); outline: none; box-shadow: 0 0 0 3px rgba(255, 197, 90, .12); }
+.time-error { margin-top: -6px; }
+.expired-shift-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 16px; border-color: rgba(255, 197, 90, .45); }
+.expired-shift-card h2 { margin-bottom: 6px; }
+.expired-shift-card p { color: var(--text-soft); line-height: 1.55; }
+.expired-shift-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 14px; color: var(--accent-gold); background: rgba(255, 197, 90, .1); }
+.load-error-state { display: grid; justify-items: start; gap: 10px; }
+.load-error-state .secondary-button { display: inline-flex; align-items: center; gap: 7px; }
 
 @media (max-width: 900px) {
   .shift-model-grid,
   .retro-evidence-grid { grid-template-columns: 1fr; }
+  .shift-time-card { grid-template-columns: 1fr; align-items: stretch; }
+  .time-now-button { justify-self: start; }
 }
 
 @media (max-width: 620px) {
@@ -2822,6 +2863,10 @@ tbody tr:hover {
   .add-model-button { width: 100%; justify-self: stretch; }
   .shift-close-actions { display: grid; grid-template-columns: 1fr; }
   .shift-close-actions > button { width: 100%; min-width: 0; }
+  .shift-time-controls { grid-template-columns: 1fr; }
+  .time-now-button { width: 100%; }
+  .expired-shift-card { grid-template-columns: auto 1fr; align-items: start; }
+  .expired-shift-card .primary-button { grid-column: 1 / -1; width: 100%; }
 }
 
 @media (max-width: 1000px) {

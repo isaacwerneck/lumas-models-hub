@@ -251,7 +251,7 @@ export const PaymentPage = () => {
       await loadChatterData();
       toast.success("Lançamento apagado com sucesso.");
     } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel apagar o lancamento.");
+      const feedback = getApiErrorMessage(requestError, "Não foi possível apagar o lançamento.");
       toast.error(feedback);
     } finally {
       setDeletingShiftId(null);
@@ -327,7 +327,7 @@ export const PaymentPage = () => {
       </div>
 
       <div className="card review-list-card" tabIndex={0} aria-label="Lançamentos">
-        <h2>Lancamentos</h2>
+        <h2>Lançamentos</h2>
         {!loading ? <div className="review-list">
           {(review?.shifts ?? []).map((shift) => (
             <article className="review-card" key={shift.id}>

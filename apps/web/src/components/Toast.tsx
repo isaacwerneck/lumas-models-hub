@@ -28,6 +28,7 @@ export const ToastProvider = ({ children, duration = 4000 }: { children: ReactNo
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
   const timersRef = useRef(new Set<number>());
+  const recentRef = useRef(new Map<string, number>());
   const reduceMotion = useReducedMotion();
 
   useEffect(() => () => {
@@ -41,6 +42,10 @@ export const ToastProvider = ({ children, duration = 4000 }: { children: ReactNo
 
   const toast = useCallback(
     (type: ToastType, message: string) => {
+      const dedupeKey = `${type}:${message}`;
+      const now = Date.now();
+      if (now - (recentRef.current.get(dedupeKey) ?? 0) < 2_000) return;
+      recentRef.current.set(dedupeKey, now);
       const id = nextId.current++;
       setToasts((current) => [...current, { id, type, message }]);
       const timer = window.setTimeout(() => {
@@ -59,7 +64,7 @@ export const ToastProvider = ({ children, duration = 4000 }: { children: ReactNo
   return (
     <ToastContext.Provider value={{ toast, success, error, info }}>
       {children}
-      <div className="toast-stack" aria-live="polite">
+      <div className="toast-stack" aria-live="polite" aria-atomic="false">
         <AnimatePresence mode="sync" initial={false}>
           {toasts.map((item) => (
             <motion.div
@@ -74,9 +79,9 @@ export const ToastProvider = ({ children, duration = 4000 }: { children: ReactNo
                 duration: reduceMotion ? motionTokens.duration.instant : motionTokens.duration.fast,
                 ease: motionTokens.easing.smooth
               }}
-              onClick={() => dismiss(item.id)}
             >
-              {item.message}
+              <span>{item.message}</span>
+              <button type="button" className="toast-dismiss" aria-label="Fechar aviso" onClick={() => dismiss(item.id)}>×</button>
             </motion.div>
           ))}
         </AnimatePresence>

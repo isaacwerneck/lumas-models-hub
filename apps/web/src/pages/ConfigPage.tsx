@@ -58,7 +58,7 @@ export const ConfigPage = () => {
       setNewPassword("");
       await logout();
     } catch (requestError: unknown) {
-      const feedback = getApiErrorMessage(requestError, "Nao foi possivel alterar a senha.");
+      const feedback = getApiErrorMessage(requestError, "Não foi possível alterar a senha.");
       toast.error(feedback);
     }
   };

@@ -140,4 +140,78 @@ describe("ShiftsPage", () => {
     expect(screen.getByText("captura.png")).toBeInTheDocument();
     expect(screen.getByLabelText("Valor do faturamento")).toHaveValue("100,00");
   });
+
+  it("envia os quatro comprovantes de duas modelos no turno anterior", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }, { id: "tag-2", name: "Aurora" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [], shift: null } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    let upload = 0;
+    apiMocks.post.mockImplementation((url: string) => {
+      if (url === "/ocr/extract") {
+        upload += 1;
+        return Promise.resolve({ data: { evidence: { id: `evidence-${upload}` }, ocrStatus: "READY", detectedValue: `${upload * 100},00`, confidence: 0.95 } });
+      }
+      if (url === "/chatter/shifts/retroactive-batch") return Promise.resolve({ data: { shifts: [] } });
+      return Promise.reject(new Error(`POST inesperado: ${url}`));
+    });
+
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Abrir ponto" });
+    fireEvent.click(screen.getByRole("button", { name: "Lançar turno anterior" }));
+    fireEvent.change(screen.getByLabelText("Entrada"), { target: { value: "10:00" } });
+    fireEvent.change(screen.getByLabelText("Saída"), { target: { value: "11:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /Adicionar segunda modelo/ }));
+    const zones = screen.getAllByRole("button", { name: /Print do faturamento/ });
+    zones.forEach((zone, index) => fireEvent.drop(zone, { dataTransfer: { files: [new File(["image"], `captura-${index}.png`, { type: "image/png" })] } }));
+    await waitFor(() => expect(screen.getAllByText("Imagem enviada — clique para trocar")).toHaveLength(4));
+    fireEvent.click(screen.getByRole("button", { name: "Lançar os dois turnos" }));
+
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith("/chatter/shifts/retroactive-batch", expect.objectContaining({
+      shifts: [
+        expect.objectContaining({ start: expect.objectContaining({ evidenceId: "evidence-1" }), end: expect.objectContaining({ evidenceId: "evidence-2" }) }),
+        expect.objectContaining({ start: expect.objectContaining({ evidenceId: "evidence-3" }), end: expect.objectContaining({ evidenceId: "evidence-4" }) })
+      ]
+    })));
+  });
+
+  it("mantém a imagem válida quando apenas o OCR fica indisponível", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [], shift: null } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    apiMocks.post.mockImplementation((url: string) => {
+      if (url === "/ocr/extract") return Promise.resolve({ data: { evidence: { id: "evidence-ready" }, ocrStatus: "UNAVAILABLE", detectedValue: null, confidence: null } });
+      if (url === "/chatter/shifts/start-batch") return Promise.resolve({ data: { shifts: [] } });
+      return Promise.reject(new Error(`POST inesperado: ${url}`));
+    });
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    const zone = await screen.findByRole("button", { name: /Print do faturamento \(início\)/ });
+    fireEvent.drop(zone, { dataTransfer: { files: [new File(["image"], "captura.png", { type: "image/png" })] } });
+    expect(await screen.findByText(/OCR está indisponível/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Valor do faturamento"), { target: { value: "100,00" } });
+    const form = screen.getByRole("heading", { name: "Abrir ponto", level: 2 }).closest("form");
+    fireEvent.click(form!.querySelector<HTMLButtonElement>("button[type='submit']")!);
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith("/chatter/shifts/start-batch", expect.objectContaining({
+      shifts: [expect.objectContaining({ evidenceId: "evidence-ready" })]
+    })));
+  });
+
+  it("bloqueia visualmente um ponto que atravessou a meia-noite", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shift: {
+        id: "expired", modelTagId: "tag-1", startedAt: new Date(Date.now() - 26 * 60 * 60_000).toISOString(),
+        startValueCents: 10_000, modelTag: { id: "tag-1", name: "Annie" }
+      } } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "Este ponto ficou aberto em outro dia" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar e corrigir" }));
+    expect(await screen.findByRole("heading", { name: "Cancelar e corrigir o ponto?" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Encerrar turno" })).not.toBeInTheDocument();
+  });
 });

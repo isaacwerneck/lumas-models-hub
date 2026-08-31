@@ -7,6 +7,7 @@ import { AreaChart } from "../components/charts/AreaChart";
 import { BarList } from "../components/charts/BarList";
 import { Donut } from "../components/charts/Donut";
 import type { AnalyticsResponse } from "../types/api";
+import { getApiErrorMessage } from "../lib/apiError";
 
 type QuickWindow = "today" | "week" | "month" | "all";
 type Metric = "gross" | "payout" | "hours" | "mph";
@@ -113,8 +114,7 @@ export const HomePage = () => {
       }
     } catch (requestError: unknown) {
       if (showLoading && requestId === analyticsRequestId.current) {
-        const apiError = requestError as { response?: { data?: { message?: string } } };
-        setError(apiError?.response?.data?.message ?? "Erro ao carregar o dashboard.");
+      setError(getApiErrorMessage(requestError, "Erro ao carregar o dashboard."));
       }
     } finally {
       if (showLoading && requestId === analyticsRequestId.current) {

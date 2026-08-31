@@ -35,7 +35,7 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
 
     const mime = file.mimetype.toLowerCase();
     if (!mime.startsWith("image/")) {
-      return reply.code(400).send({ message: "Arquivo invalido: apenas imagem e permitida." });
+      return reply.code(400).send({ message: "Arquivo inválido: apenas imagem é permitida." });
     }
 
     const rawBuffer = await file.toBuffer();
@@ -72,9 +72,17 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       throw error;
     }
 
-    const result = await Tesseract.recognize(buffer, env.OCR_LANG);
-    const rawText = result.data.text ?? "";
-    const confidence = Number(((result.data.confidence ?? 0) / 100).toFixed(4));
+    let rawText = "";
+    let confidence: number | null = null;
+    let ocrStatus: "READY" | "NO_VALUE" | "UNAVAILABLE" = "UNAVAILABLE";
+    try {
+      const result = await Tesseract.recognize(buffer, env.OCR_LANG);
+      rawText = result.data.text ?? "";
+      confidence = Number(((result.data.confidence ?? 0) / 100).toFixed(4));
+      ocrStatus = "NO_VALUE";
+    } catch (error) {
+      request.log.warn({ err: error, evidenceId: evidence.id }, "OCR unavailable after evidence upload");
+    }
 
     const candidates = extractCurrencyCandidatesFromText(rawText);
     const contextualDetectedValue = extractFaturadoValueFromText(rawText);
@@ -87,6 +95,7 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       if (contextualCents !== null) {
         detectedValue = contextualDetectedValue;
         detectedCents = contextualCents;
+        ocrStatus = "READY";
       }
     }
 
@@ -100,6 +109,7 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
         if (detectedCents === null || cents > detectedCents) {
           detectedCents = cents;
           detectedValue = candidate;
+          ocrStatus = "READY";
         }
       }
     }
@@ -109,10 +119,11 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
       if (fallbackCents !== null) {
         detectedCents = fallbackCents;
         detectedValue = query.fallbackValue;
+        ocrStatus = "READY";
       }
     }
 
-    if (confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD) {
+    if (confidence !== null && confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD) {
       await createNotifications(fastify, {
         userIds: [authUser.sub],
         type: NotificationType.OCR_LOW_CONFIDENCE,
@@ -127,10 +138,11 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
     return {
       rawText,
       confidence,
+      ocrStatus,
       candidates,
       detectedValue,
       detectedCents,
-      requiresManualConfirmation: confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD
+      requiresManualConfirmation: confidence === null || confidence < env.OCR_LOW_CONFIDENCE_THRESHOLD
       ,evidence: {
         id: evidence.id,
         originalName: evidence.originalName,

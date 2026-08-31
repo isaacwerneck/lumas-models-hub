@@ -12,6 +12,16 @@ export const businessDateKey = (date: Date) => dayjs(date).tz(env.TZ).format("YY
 
 export const businessTimeLabel = (date: Date) => dayjs(date).tz(env.TZ).format("HH:mm");
 
+export const businessDateTimeLabel = (date: Date) => dayjs(date).tz(env.TZ).format("DD/MM/YYYY [às] HH:mm");
+
+export const isSameBusinessDate = (first: Date, second: Date) => businessDateKey(first) === businessDateKey(second);
+
+export const parseBusinessLocalDateTime = (dateKey: string, time: string) => {
+  const parsed = dayjs.tz(`${dateKey}T${time}:00`, env.TZ);
+  if (!parsed.isValid() || parsed.format("YYYY-MM-DD") !== dateKey || parsed.format("HH:mm") !== time) return null;
+  return parsed.toDate();
+};
+
 export const businessDateKeysInclusive = (firstKey: string, lastKey: string) => {
   const keys: string[] = [];
   let cursor = dayjs.tz(firstKey, env.TZ).startOf("day");

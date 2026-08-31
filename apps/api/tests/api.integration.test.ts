@@ -7,7 +7,7 @@ import { buildRefreshToken, tokenHash } from "../src/modules/auth/auth.service";
 import { env } from "../src/config/env";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../src/services/evidence-cleanup";
 import { createNotifications } from "../src/modules/notifications/notification.service";
-import { businessTimeLabel } from "../src/utils/time";
+import { businessDateKey, businessTimeLabel } from "../src/utils/time";
 
 const app = buildApp();
 let managerId = "";
@@ -467,6 +467,7 @@ describe("turnos", () => {
     await app.prisma.shift.deleteMany({ where: { chatterId: candidate.id } });
     await app.prisma.evidence.deleteMany({ where: { uploadedById: candidate.id } });
     await app.prisma.chatterModelTag.deleteMany({ where: { chatterId: candidate.id } });
+    await app.prisma.chatMessage.deleteMany({ where: { senderId: candidate.id } });
     await app.prisma.auditLog.deleteMany({ where: { OR: [{ actorId: candidate.id }, { targetId: candidate.id }] } });
     await app.prisma.refreshSession.deleteMany({ where: { userId: candidate.id } });
     await app.prisma.user.delete({ where: { id: candidate.id } });
@@ -555,8 +556,8 @@ describe("turnos", () => {
   });
   it("encerra uma única vez sob requisições concorrentes e cria um único evento", async () => {
     const startEvidence = await createTestEvidence(otherChatterId, "corrida-fechamento-inicio.webp");
-    const startedAt = new Date("2026-08-26T11:00:00.000Z");
-    const endedAt = new Date("2026-08-26T13:00:00.000Z");
+    const startedAt = new Date(Date.now() - 10 * 60_000);
+    const endedAt = new Date(Date.now() - 5 * 60_000);
     const opened = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: {
       modelTagId: otherTagId, startedAt: startedAt.toISOString(), startEvidenceId: startEvidence.id,
       manualConfirmedValue: "R$ 100,00", notificationsEnabled: true
@@ -729,6 +730,14 @@ describe("turnos", () => {
       }]
     } });
     expect(retro.statusCode).toBe(201);
+    const retroShiftId = json(retro).shifts[0].id as string;
+    const retroEvents = await app.prisma.chatMessage.findMany({
+      where: { shiftId: retroShiftId, kind: "SHIFT_EVENT" }, orderBy: { createdAt: "asc" }
+    });
+    expect(retroEvents.map((event) => event.eventType)).toEqual(["OPENED", "CLOSED"]);
+    expect(retroEvents.map((event) => event.occurredAt?.toISOString())).toEqual([
+      new Date(json(retro).shifts[0].startedAt).toISOString(), new Date(json(retro).shifts[0].endedAt).toISOString()
+    ]);
 
     const overlapEvidence = await Promise.all([
       createTestEvidence(chatterId, "sobreposto-inicio.webp"), createTestEvidence(chatterId, "sobreposto-fim.webp")
@@ -742,6 +751,36 @@ describe("turnos", () => {
     } });
     expect(overlap.statusCode).toBe(409);
     await app.prisma.shift.delete({ where: { id: json(online).shift.id } });
+  });
+  it("bloqueia fechamento em outro dia e registra o cancelamento no chat", async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60_000);
+    const expired = await app.prisma.shift.create({ data: {
+      chatterId, modelTagId: tagId, status: "OPEN", startedAt: yesterday, startValueCents: 10_000
+    } });
+    const evidence = await createTestEvidence(chatterId, "fechamento-dia-seguinte.webp");
+    const close = await app.inject({ method: "POST", url: `/api/v1/chatter/shifts/${expired.id}/end`, headers: auth(chatterToken), payload: {
+      endedAt: new Date().toISOString(), endEvidenceId: evidence.id, manualConfirmedValue: "R$ 120,00"
+    } });
+    expect(close.statusCode).toBe(409);
+    expect(json(close).error.code).toBe("SHIFT_EXPIRED_OPEN");
+
+    const cancelled = await app.inject({ method: "DELETE", url: `/api/v1/chatter/shifts/${expired.id}`, headers: auth(chatterToken) });
+    expect(cancelled.statusCode).toBe(200);
+    const event = await app.prisma.chatMessage.findUniqueOrThrow({ where: { shiftId_eventType: { shiftId: expired.id, eventType: "CANCELLED" } } });
+    expect(event.content).toContain("cancelou o ponto");
+    expect(event.occurredAt).not.toBeNull();
+  });
+  it("aceita horário local do negócio e rejeita abertura fora do dia atual", async () => {
+    const evidence = await createTestEvidence(chatterId, "data-local.webp");
+    const currentDate = businessDateKey(new Date());
+    const previousDate = businessDateKey(new Date(Date.now() - 24 * 60 * 60_000));
+    const invalid = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start-batch", headers: auth(chatterToken), payload: {
+      businessDate: previousDate, startedTime: "12:00", startedAt: new Date().toISOString(), notificationsEnabled: true,
+      shifts: [{ modelTagId: tagId, evidenceId: evidence.id, manualConfirmedValue: "R$ 100,00" }]
+    } });
+    expect(currentDate).not.toBe(previousDate);
+    expect(invalid.statusCode).toBe(400);
+    expect(json(invalid).error.code).toBe("SHIFT_START_TODAY_ONLY");
   });
   it("permite ao gerente apagar turno confirmado não pago e protege turno pago", async () => {
     const removable = await app.prisma.shift.create({ data: {

@@ -5,7 +5,7 @@ import { env } from "../../config/env";
 import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pagination";
 import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
-import { getMonthRangeInBusinessTz, nowInBusinessTz } from "../../utils/time";
+import { businessDateKey, getMonthRangeInBusinessTz, isSameBusinessDate, nowInBusinessTz, parseBusinessLocalDateTime } from "../../utils/time";
 import { calculatePayoutCents } from "../../utils/payout";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { queueEvidencePurge } from "../../services/evidence-cleanup";
@@ -33,6 +33,8 @@ const moneyMetadataSchema = z.object({
 const startShiftSchema = z.object({
   modelTagId: z.string().min(1),
   startedAt: z.string().datetime().optional(),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  startedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   startImageUrl: z.string().min(1).optional(),
   startEvidenceId: z.string().min(1).optional(),
   moneyMetadata: moneyMetadataSchema,
@@ -45,6 +47,8 @@ const startShiftSchema = z.object({
 
 const closeShiftSchema = z.object({
   endedAt: z.string().datetime().optional(),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  endedTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   endImageUrl: z.string().min(1).optional(),
   endEvidenceId: z.string().min(1).optional(),
   moneyMetadata: moneyMetadataSchema,
@@ -94,7 +98,7 @@ const updateShiftSchema = z
       value.endValue !== undefined ||
       value.negativeJustification !== undefined ||
       value.notes !== undefined,
-    { message: "Informe pelo menos um campo para atualizacao." }
+    { message: "Informe pelo menos um campo para atualização." }
   );
 
 const ensureChatterRole = (role: Role) => {
@@ -103,6 +107,15 @@ const ensureChatterRole = (role: Role) => {
   }
 
   return true;
+};
+
+const resolveRouteDateTime = (input: { businessDate?: string; time?: string; iso?: string; fallback: Date }) => {
+  if (input.businessDate || input.time) {
+    if (!input.businessDate || !input.time) return null;
+    return parseBusinessLocalDateTime(input.businessDate, input.time);
+  }
+  const parsed = input.iso ? new Date(input.iso) : input.fallback;
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 const chatterRoutes: FastifyPluginAsync = async (fastify) => {
@@ -115,7 +128,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     if (shift?.earnings?.status === EarningsStatus.PAID) {
       return {
         editable: false,
-        message: "Lancamentos de ganho ja pago nao podem ser editados ou apagados."
+        message: "Lançamentos de ganho já pago não podem ser editados ou apagados."
       };
     }
 
@@ -337,7 +350,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     });
 
     if (!shift) {
-      return reply.code(404).send({ message: "Lancamento fechado nao encontrado." });
+      return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
     }
 
     const editable = await ensureEditableEarnings(authUser.sub, shift.id);
@@ -349,22 +362,25 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const endedAt = body.endedAt ? new Date(body.endedAt) : shift.endedAt;
 
     if (!endedAt) {
-      return reply.code(400).send({ message: "Lancamento fechado precisa de data/hora final." });
+      return reply.code(400).send({ message: "Lançamento fechado precisa de data/hora final." });
     }
 
     if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
-      return reply.code(400).send({ message: "Data/hora invalida." });
+      return reply.code(400).send({ message: "Data/hora inválida." });
     }
 
     if (endedAt <= startedAt) {
-      return reply.code(400).send({ message: "Data/hora final precisa ser posterior ao inicio." });
+      return reply.code(400).send({ message: "Data/hora final precisa ser posterior ao início." });
+    }
+    if ((body.startedAt !== undefined || body.endedAt !== undefined) && !isSameBusinessDate(startedAt, endedAt)) {
+      return reply.code(400).send({ code: "SHIFT_CROSS_DAY", message: "A entrada e a saída precisam acontecer no mesmo dia." });
     }
 
     const startValueCents = body.startValue !== undefined ? brlStringToCents(body.startValue) : shift.startValueCents;
     const endValueCents = body.endValue !== undefined ? brlStringToCents(body.endValue) : shift.endValueCents;
 
     if (startValueCents === null || endValueCents === null) {
-      return reply.code(400).send({ message: "Valor invalido. Use formato brasileiro, ex: R$ 1.234,56." });
+      return reply.code(400).send({ message: "Valor inválido. Use formato brasileiro, ex: R$ 1.234,56." });
     }
 
     const grossAmountCents = endValueCents - startValueCents;
@@ -475,11 +491,12 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       where: {
         id: params.shiftId,
         chatterId: authUser.sub
-      }
+      },
+      include: { chatter: { select: { id: true, displayName: true } } }
     });
 
     if (!shift) {
-      return reply.code(404).send({ message: "Lancamento nao encontrado." });
+      return reply.code(404).send({ message: "Lançamento não encontrado." });
     }
 
     if (shift.status === ShiftStatus.CLOSED) {
@@ -493,7 +510,17 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       where: { id: { in: [shift.startEvidenceId, shift.endEvidenceId].filter((id): id is string => Boolean(id)) } },
       select: { id: true, sha256: true }
     });
-    await fastify.prisma.$transaction(async (tx) => {
+    const chatMessage = await fastify.prisma.$transaction(async (tx) => {
+      const cancellation = shift.status === ShiftStatus.OPEN
+        ? await createShiftChatEvent(tx, {
+            chatterId: shift.chatter.id,
+            chatterDisplayName: shift.chatter.displayName,
+            modelTagId: shift.modelTagId,
+            shiftId: shift.id,
+            occurredAt: new Date(),
+            event: "CANCELLED"
+          })
+        : null;
       await queueEvidencePurge(tx, evidence.map((item) => item.id));
       await tx.shift.delete({ where: { id: shift.id } });
       await tx.auditLog.create({
@@ -510,12 +537,14 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           }
         }
       });
+      return cancellation;
     });
 
     fastify.io.to(MANAGER_ROOM).emit(ANALYTICS_UPDATED_EVENT, {
       shiftId: shift.id,
       operation: "deleted"
     });
+    if (chatMessage) fastify.io.to(modelRoomName(chatMessage.modelTagId)).emit("chat:message", chatMessage);
 
     return {
       success: true
@@ -534,10 +563,22 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     if (isV1 && !body.startEvidenceId) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
     if (!isV1 && !body.startEvidenceId && !body.startImageUrl) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
     if (!body.notificationsEnabled) return reply.code(403).send({ message: "Ative as notificações do navegador nas Preferências antes de abrir o ponto.", code: "NOTIFICATIONS_REQUIRED" });
-    const startedAt = body.startedAt ? new Date(body.startedAt) : nowInBusinessTz().toDate();
+    const now = nowInBusinessTz().toDate();
+    const startedAt = resolveRouteDateTime({
+      businessDate: body.businessDate,
+      time: body.startedTime,
+      iso: body.startedAt,
+      fallback: now
+    });
 
-    if (Number.isNaN(startedAt.getTime())) {
-      return reply.code(400).send({ message: "Data/hora de inicio invalida." });
+    if (!startedAt) {
+      return reply.code(400).send({ code: "SHIFT_DATE_TIME_INVALID", message: "Data ou horário de entrada inválido." });
+    }
+    if (businessDateKey(startedAt) !== businessDateKey(now)) {
+      return reply.code(400).send({ code: "SHIFT_START_TODAY_ONLY", message: "O ponto atual só pode ser aberto na data de hoje." });
+    }
+    if (startedAt > now) {
+      return reply.code(400).send({ code: "SHIFT_TIME_IN_FUTURE", message: "O horário de entrada não pode estar no futuro." });
     }
 
     const resolvedCents = resolveOcrValueCents({
@@ -633,6 +674,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         chatterId: chatter.id,
         chatterDisplayName: chatter.displayName,
         modelTagId: created.modelTagId,
+        shiftId: created.id,
         occurredAt: startedAt,
         event: "OPENED"
       });
@@ -674,10 +716,15 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const isV1 = request.url.startsWith("/api/v1/");
     if (isV1 && !body.endEvidenceId) return reply.code(400).send({ message: "Envie o comprovante final antes de encerrar o turno." });
     if (!isV1 && !body.endEvidenceId && !body.endImageUrl) return reply.code(400).send({ message: "Envie o comprovante final antes de encerrar o turno." });
-    const endedAt = body.endedAt ? new Date(body.endedAt) : nowInBusinessTz().toDate();
+    const endedAt = resolveRouteDateTime({
+      businessDate: body.businessDate,
+      time: body.endedTime,
+      iso: body.endedAt,
+      fallback: nowInBusinessTz().toDate()
+    });
 
-    if (Number.isNaN(endedAt.getTime())) {
-      return reply.code(400).send({ message: "Data/hora de batida invalida." });
+    if (!endedAt) {
+      return reply.code(400).send({ code: "SHIFT_DATE_TIME_INVALID", message: "Data ou horário de saída inválido." });
     }
 
     const shift = await fastify.prisma.shift.findFirst({
@@ -694,7 +741,13 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (endedAt <= shift.startedAt) {
-      return reply.code(400).send({ message: "Data/hora da batida final precisa ser posterior ao inicio do turno." });
+      return reply.code(400).send({ message: "Data/hora da batida final precisa ser posterior ao início do turno." });
+    }
+    if (endedAt > nowInBusinessTz().toDate()) {
+      return reply.code(400).send({ code: "SHIFT_TIME_IN_FUTURE", message: "O horário de saída não pode estar no futuro." });
+    }
+    if (!isSameBusinessDate(shift.startedAt, endedAt)) {
+      return reply.code(409).send({ code: "SHIFT_EXPIRED_OPEN", message: "Este ponto ficou aberto em outro dia. Cancele-o e lance o período correto como turno anterior." });
     }
 
     const resolvedCents = resolveOcrValueCents({
@@ -819,6 +872,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         chatterId: authUser.sub,
         chatterDisplayName: shift.chatter.displayName,
         modelTagId: shift.modelTagId,
+        shiftId: updatedShift.id,
         occurredAt: endedAt,
         event: "CLOSED"
       });
@@ -828,7 +882,6 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       if ((error as Error).message === "SHIFT_NO_LONGER_OPEN") return "SHIFT_NO_LONGER_OPEN" as const;
       throw error;
     });
-
     if (closedResult === "EVIDENCE_NOT_ATTACHABLE") {
       return reply.code(409).send({ message: "Comprovante inválido, já utilizado ou pertencente a outro usuário." });
     }

@@ -8,7 +8,8 @@ export type FxRateResponse = {
 };
 
 export type OcrExtractResponse = {
-  confidence: number;
+  confidence: number | null;
+  ocrStatus: "READY" | "NO_VALUE" | "UNAVAILABLE";
   detectedValue: string | null;
   rawText: string;
   evidence: {

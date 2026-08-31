@@ -1,15 +1,18 @@
 import { useRef } from "react";
 
 type ImageDropzoneProps = {
+  id?: string;
   title: string;
   fileName: string | null;
-  reading: boolean;
+  status: "idle" | "uploading" | "ready" | "error";
+  error?: string | null;
+  advisory?: string | null;
   onFile: (file: File) => void;
   active?: boolean;
   onActivate?: () => void;
 };
 
-export const ImageDropzone = ({ title, fileName, reading, onFile, active = false, onActivate }: ImageDropzoneProps) => {
+export const ImageDropzone = ({ id, title, fileName, status, error, advisory, onFile, active = false, onActivate }: ImageDropzoneProps) => {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const pickFile = () => {
@@ -18,9 +21,13 @@ export const ImageDropzone = ({ title, fileName, reading, onFile, active = false
 
   return (
     <div
-      className={active ? "dropzone is-paste-target" : "dropzone"}
+      id={id}
+      className={`dropzone${active ? " is-paste-target" : ""}${status === "ready" ? " is-ready" : ""}${status === "error" ? " has-error" : ""}`}
       role="button"
       tabIndex={0}
+      aria-busy={status === "uploading"}
+      aria-invalid={status === "error" || Boolean(error)}
+      aria-describedby={(error || advisory) && id ? `${id}-feedback` : undefined}
       onClick={() => {
         onActivate?.();
         pickFile();
@@ -64,12 +71,15 @@ export const ImageDropzone = ({ title, fileName, reading, onFile, active = false
       <span className="dz-title">{title}</span>
       {fileName ? <span className="dz-file">{fileName}</span> : null}
       <span className="dz-hint">
-        {reading
-          ? "Lendo com OCR..."
-          : fileName
-            ? "Clique, arraste ou Ctrl+V para trocar"
-            : "Clique, arraste a imagem ou pressione Ctrl+V"}
+        {status === "uploading"
+          ? "Enviando imagem…"
+          : status === "error"
+            ? "Falha no envio — clique para tentar novamente"
+            : status === "ready"
+              ? "Imagem enviada — clique para trocar"
+              : "Clique, arraste a imagem ou pressione Ctrl+V"}
       </span>
+      {error || advisory ? <span id={id ? `${id}-feedback` : undefined} className={error ? "dz-feedback error" : "dz-feedback"}>{error ?? advisory}</span> : null}
       <input
         ref={inputRef}
         type="file"

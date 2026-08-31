@@ -119,6 +119,17 @@ describe("ChatPage realtime", () => {
     expect(screen.queryByText("Isaac", { selector: ".message-item strong" })).not.toBeInTheDocument();
   });
 
+  it("usa o horário real e o tipo estruturado do evento de ponto", async () => {
+    mocks.get.mockImplementation((url: string) => Promise.resolve(url.endsWith("/messages")
+      ? { data: { messages: [{ ...message("shift-structured", "Isaac bateu o ponto às 16:40."), kind: "SHIFT_EVENT", eventType: "CLOSED", occurredAt: "2026-08-18T19:40:00.000Z" }] } }
+      : { data: { rooms: [{ id: "room-1", name: "Annie" }] } }));
+
+    render(<ChatPage />);
+    expect(await screen.findByText("Isaac bateu o ponto")).toBeInTheDocument();
+    expect(screen.getByText("Saída")).toBeInTheDocument();
+    expect(screen.getByText(/18\/08\/2026/)).toBeInTheDocument();
+  });
+
   it("mostra erro v1 quando o fallback HTTP falha", async () => {
     mocks.get.mockImplementation((url: string) => Promise.resolve(url.endsWith("/messages")
       ? { data: { messages: [] } }

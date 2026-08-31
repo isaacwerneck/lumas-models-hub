@@ -8,7 +8,9 @@ import {
   getMonthRangeInBusinessTz,
   getWeekRangeInBusinessTz,
   isMondayInBusinessTz,
-  nowInBusinessTz
+  isSameBusinessDate,
+  nowInBusinessTz,
+  parseBusinessLocalDateTime
 } from "./time";
 
 describe("períodos em America/Sao_Paulo", () => {
@@ -49,5 +51,12 @@ describe("períodos em America/Sao_Paulo", () => {
 
   it("formata o horário dos eventos no fuso do negócio", () => {
     expect(businessTimeLabel(new Date("2026-08-20T01:30:00.000Z"))).toBe("22:30");
+  });
+
+  it("interpreta campos locais e detecta a virada do dia operacional", () => {
+    expect(parseBusinessLocalDateTime("2026-08-20", "18:25")).toEqual(new Date("2026-08-20T21:25:00.000Z"));
+    expect(parseBusinessLocalDateTime("2026-02-31", "18:25")).toBeNull();
+    expect(isSameBusinessDate(new Date("2026-08-20T03:00:00.000Z"), new Date("2026-08-21T02:59:59.000Z"))).toBe(true);
+    expect(isSameBusinessDate(new Date("2026-08-21T02:59:59.000Z"), new Date("2026-08-21T03:00:00.000Z"))).toBe(false);
   });
 });

@@ -90,7 +90,7 @@ export const buildApp = () => {
     reply.header("X-Request-Id", request.id);
     if (request.url.startsWith("/api/v1/") && reply.statusCode >= 400 && typeof payload === "string") {
       try {
-        const body = JSON.parse(payload) as { error?: unknown; message?: string; issues?: unknown };
+        const body = JSON.parse(payload) as { error?: unknown; code?: string; message?: string; issues?: unknown };
         if (!body.error && body.message) {
           const codes: Record<number, string> = {
             400: "BAD_REQUEST",
@@ -105,7 +105,7 @@ export const buildApp = () => {
           reply.removeHeader("content-length");
           return JSON.stringify({
             error: {
-              code: codes[reply.statusCode] ?? "REQUEST_ERROR",
+              code: body.code ?? codes[reply.statusCode] ?? "REQUEST_ERROR",
               message: body.message,
               ...(body.issues ? { issues: body.issues } : {}),
               requestId: request.id
