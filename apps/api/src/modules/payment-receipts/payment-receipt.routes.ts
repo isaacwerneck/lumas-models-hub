@@ -3,6 +3,7 @@ import { AuditAction, Role } from "@prisma/client";
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { newPaymentReceiptKey, validatePaymentReceipt } from "../../services/storage";
+import { inlineContentDisposition } from "../../utils/content-disposition";
 
 const paramsSchema = z.object({ receiptId: z.string().min(1) });
 
@@ -92,11 +93,10 @@ const paymentReceiptRoutes: FastifyPluginAsync = async (fastify) => {
     if (!receipt.payment && receipt.uploadedById !== authUser.sub) return reply.code(403).send({ message: "Sem acesso a este comprovante." });
     const stored = await fastify.evidenceStorage.get(receipt.storageKey);
     if (!stored) return reply.code(410).send({ message: "Arquivo do comprovante indisponível." });
-    const fileName = path.basename(receipt.originalName).replace(/[\r\n"]/g, "_");
     return reply
       .type(receipt.mimeType)
       .header("Cache-Control", "private, no-store")
-      .header("Content-Disposition", `inline; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+      .header("Content-Disposition", inlineContentDisposition(receipt.originalName))
       .send(stored.buffer);
   });
 };

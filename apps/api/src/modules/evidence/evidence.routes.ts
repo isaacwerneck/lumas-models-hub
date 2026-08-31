@@ -1,7 +1,7 @@
-import path from "node:path";
 import { EvidenceStatus, Role } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { inlineContentDisposition } from "../../utils/content-disposition";
 
 const paramsSchema = z.object({ evidenceId: z.string().min(1) });
 
@@ -21,11 +21,10 @@ const evidenceRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const stored = await fastify.evidenceStorage.get(evidence.storageKey);
     if (!stored) return reply.code(410).send({ message: "Arquivo do comprovante indisponível." });
-    const fileName = path.basename(evidence.originalName).replace(/[\r\n"]/g, "_");
     return reply
       .type(stored.mimeType)
       .header("Cache-Control", "private, no-store")
-      .header("Content-Disposition", `inline; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+      .header("Content-Disposition", inlineContentDisposition(evidence.originalName))
       .send(stored.buffer);
   });
 };
