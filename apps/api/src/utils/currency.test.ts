@@ -4,6 +4,7 @@ import {
   centsToBrl,
   extractCurrencyCandidatesFromText,
   extractFaturadoValueFromText,
+  findFirstCurrencyCandidate,
   resolveOcrValueCents
 } from "./currency";
 
@@ -36,10 +37,28 @@ describe("utilitários monetários", () => {
     expect(extractFaturadoValueFromText(text)).toBe(expected);
   });
 
-  it("resolve valor detectado, texto ancorado, maior candidato e ausência", () => {
+  it("prioriza o primeiro valor monetário quando o OCR organiza os cards em colunas", () => {
+    const dashboardText = [
+      "Faturamento",
+      "Liberado",
+      "Total",
+      "Hoje",
+      "Valor disponível para saque",
+      "Saldo liberado + a liberar",
+      "R$ 105,52",
+      "R$ 65,52",
+      "R$ 1.012,15"
+    ].join("\n");
+
+    expect(findFirstCurrencyCandidate(dashboardText)).toEqual({ value: "R$ 105,52", cents: 10552 });
+    expect(resolveOcrValueCents({ rawText: dashboardText })).toBe(10552);
+  });
+
+  it("resolve valor detectado, texto ancorado, primeiro candidato e ausência", () => {
     expect(resolveOcrValueCents({ detectedValue: "R$ 10,00" })).toBe(1000);
     expect(resolveOcrValueCents({ rawText: "Faturamento\nR$ 20,00" })).toBe(2000);
-    expect(resolveOcrValueCents({ rawText: "taxa 10,00 e saldo 99,90" })).toBe(9990);
+    expect(resolveOcrValueCents({ rawText: "taxa 10,00 e saldo 99,90" })).toBe(1000);
+    expect(resolveOcrValueCents({ rawText: "Faturamento\n0,00\nLiberado\nR$ 99,00" })).toBe(0);
     expect(resolveOcrValueCents({ rawText: "sem valor" })).toBeNull();
     expect(resolveOcrValueCents({ rawText: `${"9".repeat(400)},00` })).toBeNull();
     expect(resolveOcrValueCents({})).toBeNull();

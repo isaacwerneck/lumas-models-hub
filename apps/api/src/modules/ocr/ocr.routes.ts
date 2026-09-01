@@ -7,7 +7,8 @@ import { env } from "../../config/env";
 import {
   brlStringToCents,
   extractCurrencyCandidatesFromText,
-  extractFaturadoValueFromText
+  extractFaturadoValueFromText,
+  findFirstCurrencyCandidate
 } from "../../utils/currency";
 import { createNotifications } from "../notifications/notification.service";
 import { newEvidenceKey, normalizeEvidenceImage } from "../../services/storage";
@@ -109,17 +110,11 @@ const ocrRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (detectedCents === null) {
-      for (const candidate of candidates) {
-        const cents = brlStringToCents(candidate);
-        if (cents === null) {
-          continue;
-        }
-
-        if (detectedCents === null || cents > detectedCents) {
-          detectedCents = cents;
-          detectedValue = candidate;
-          ocrStatus = "READY";
-        }
+      const firstCandidate = findFirstCurrencyCandidate(rawText);
+      if (firstCandidate) {
+        detectedCents = firstCandidate.cents;
+        detectedValue = firstCandidate.value;
+        ocrStatus = "READY";
       }
     }
 

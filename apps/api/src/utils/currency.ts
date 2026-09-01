@@ -26,6 +26,17 @@ export const extractCurrencyCandidatesFromText = (rawText: string): string[] => 
   return matches.map((match) => match.trim());
 };
 
+export const findFirstCurrencyCandidate = (rawText: string): { value: string; cents: number } | null => {
+  for (const value of extractCurrencyCandidatesFromText(rawText)) {
+    const cents = brlStringToCents(value);
+    if (cents !== null && cents >= 0) {
+      return { value, cents };
+    }
+  }
+
+  return null;
+};
+
 const normalizeForSearch = (value: string) => {
   return value
     .normalize("NFD")
@@ -244,21 +255,9 @@ export const resolveOcrValueCents = (params: {
     }
   }
 
-  const candidates = extractCurrencyCandidatesFromText(params.rawText);
-  if (!candidates.length) {
-    return null;
-  }
-
-  // Prefer the highest parsed value to avoid selecting small unrelated amounts.
-  const parsed = candidates
-    .map((candidate) => brlStringToCents(candidate))
-    .filter((value): value is number => value !== null);
-
-  if (!parsed.length) {
-    return null;
-  }
-
-  return Math.max(...parsed);
+  // O dashboard apresenta Faturamento, Liberado e Total da esquerda para a direita.
+  // O Tesseract mantém essa ordem no texto, portanto o primeiro valor é o faturamento.
+  return findFirstCurrencyCandidate(params.rawText)?.cents ?? null;
 };
 
 export const centsToBrl = (cents: number): string => {
