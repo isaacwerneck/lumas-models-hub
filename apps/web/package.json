@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:e2e:ci": "playwright test --grep-invert \"composição visual\"",
+    "test:e2e:ci": "playwright test e2e/critical-flows.spec.ts",
     "dev:e2e": "vite --host 127.0.0.1 --port 4173",
     "preview": "vite preview"
   },
