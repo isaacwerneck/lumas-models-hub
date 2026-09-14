@@ -22,6 +22,7 @@
     "coverage:api": "npm run test --workspace @lumas/api -- --coverage",
     "coverage:web": "npm run test --workspace web -- --coverage",
     "test:e2e": "npm run test:e2e --workspace web",
+    "test:e2e:ci": "npm run test:e2e:ci --workspace web",
     "test": "npm run test:api && npm run test:web",
     "test:api": "npm run test --workspace @lumas/api",
     "test:web": "npm run test --workspace web",

@@ -47,7 +47,7 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e -- --grep-invert "composição visual"
+      - run: npm run test:e2e:ci
       - name: Publicar evidências E2E em caso de falha
         if: failure()
         uses: actions/upload-artifact@v4
