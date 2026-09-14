@@ -8,13 +8,14 @@ import { useToast } from "../components/Toast";
 import { getApiErrorMessage } from "../lib/apiError";
 import { ManagerTagsPage } from "./ManagerTagsPage";
 import { ModalDialog } from "../components/ModalDialog";
+import { ManagerPointsGallery } from "./ManagerPointsGallery";
 
 export const ManagerChattersPage = () => {
   const [chatters, setChatters] = useState<ChatterListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useSearchParams();
-  const section = params.get("section") === "tags" ? "tags" : "team";
+  const section = params.get("section") === "tags" ? "tags" : params.get("section") === "points" ? "points" : "team";
   const search = params.get("search") ?? "";
   const page = Number(params.get("page") ?? 1);
   const [debouncedSearch, setDebouncedSearch] = useState(search);
@@ -111,6 +112,16 @@ export const ManagerChattersPage = () => {
         <button
           type="button"
           role="tab"
+          className={section === "points" ? "active" : ""}
+          aria-selected={section === "points"}
+          aria-controls="manager-points-panel"
+          onClick={() => setParams({ section: "points" })}
+        >
+          Galeria
+        </button>
+        <button
+          type="button"
+          role="tab"
           className={section === "tags" ? "active" : ""}
           aria-selected={section === "tags"}
           aria-controls="manager-tags-panel"
@@ -124,6 +135,8 @@ export const ManagerChattersPage = () => {
         <div id="manager-tags-panel" role="tabpanel">
           <ManagerTagsPage embedded />
         </div>
+      ) : section === "points" ? (
+        <div id="manager-points-panel" role="tabpanel"><ManagerPointsGallery /></div>
       ) : (
         <div id="manager-chatters-panel" className="stack-gap" role="tabpanel">
       <div className="list-action-row"><button className="primary-button" type="button" onClick={() => setCreateOpen(true)}>Novo chatter</button></div>

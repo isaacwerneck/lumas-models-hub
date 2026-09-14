@@ -2446,6 +2446,10 @@ tbody tr:hover {
 .review-captures .evidence-link { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-card-footer { min-height: 58px; border-top: 1px solid rgba(255, 255, 255, .07); }
 .review-card-footer > span { text-transform: none; letter-spacing: 0; font-weight: 600; }
+.review-confirmation-lock { display: flex; align-items: flex-start; gap: 9px; max-width: 620px; padding: 9px 11px; border: 1px solid rgba(245, 199, 106, .34); border-radius: 10px; color: var(--accent-gold); background: rgba(245, 199, 106, .09); }
+.review-confirmation-lock > svg { flex: 0 0 auto; margin-top: 1px; }
+.review-confirmation-lock > span { display: grid; gap: 2px; color: var(--text-pink-light); font-size: .76rem; line-height: 1.35; }
+.review-confirmation-lock strong { color: var(--accent-gold); font-size: .78rem; }
 .review-actions-cell { min-width: 190px; display: flex; justify-content: flex-end; }
 .review-status-cell { min-width: 154px; white-space: nowrap; }
 .review-status { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid; border-radius: 999px; font-size: .76rem; font-weight: 800; line-height: 1; }
@@ -2526,6 +2530,7 @@ tbody tr:hover {
   .review-metric-grid, .review-captures { border-left: 0; border-top: 1px solid rgba(255, 255, 255, .07); }
   .review-captures { grid-template-columns: 1fr; }
   .review-actions-cell { min-width: 0; width: 100%; }
+  .review-confirmation-lock { width: 100%; max-width: none; }
   .review-actions { justify-content: stretch; }
   .review-confirm-button, .review-reopen-button { flex: 1; }
   .manager-danger-zone { grid-template-columns: 1fr; }
@@ -2603,6 +2608,18 @@ tbody tr:hover {
   width: min(520px, 100%);
   gap: 18px;
   padding: 22px;
+  background: var(--glass-fill-solid);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.modal.modal-solid {
+  background-color: var(--glass-fill-solid) !important;
+  background-image: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  opacity: 1;
+  isolation: isolate;
 }
 .payment-confirmation-modal > h2,
 .payment-confirmation-modal > p { margin: 0; }
@@ -2752,6 +2769,54 @@ tbody tr:hover {
 .percentage-field input { width: 100%; padding-right: 2.5rem; }
 .percentage-field span { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-weight: 800; pointer-events: none; }
 .payout-settings-card .primary-button { width: fit-content; }
+.extra-point-settings { display: grid; gap: 14px; border-top: 1px solid var(--surface-border); padding-top: 18px; margin-top: 4px; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.toggle-row > span { display: grid; gap: 4px; }
+.toggle-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--brand-magenta); }
+.extra-point-fields { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(180px, 220px); gap: 14px; }
+.extra-point-settings > .secondary-button { width: fit-content; }
+.zero-evidence-hint { display: block; margin-top: -4px; color: var(--accent-gold); }
+
+.payments-page { background: var(--bg-outer); border-radius: 22px; padding: clamp(14px, 2vw, 28px); min-height: calc(100vh - 64px); }
+
+.points-gallery-filters { display: grid; grid-template-columns: auto repeat(4, minmax(150px, 1fr)); align-items: end; gap: 14px; }
+.points-gallery-filters > .eyebrow { align-self: center; }
+.points-gallery-filters label { display: grid; gap: 6px; font-size: .78rem; color: var(--text-muted); font-weight: 700; }
+.points-gallery-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.points-gallery-skeleton { min-height: 280px; }
+.point-gallery-card { display: grid; gap: 16px; min-width: 0; }
+.point-gallery-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.point-gallery-card h3 { margin: 4px 0 0; }
+.point-gallery-times { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: .82rem; }
+.point-gallery-card dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.point-gallery-card dl div, .point-detail-grid div { display: grid; gap: 3px; padding: 10px; border-radius: 10px; background: color-mix(in srgb, var(--bg-input) 75%, transparent); }
+.point-gallery-card dt, .point-detail-grid span { color: var(--text-muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+.point-gallery-card dd { margin: 0; font-weight: 800; }
+.point-gallery-card > .secondary-button { width: 100%; }
+.point-state-open { color: var(--accent-gold); }
+.point-state-confirmed, .point-state-paid { color: #7de5aa; }
+.point-state-pending { color: var(--text-pink-light); }
+.point-gallery-modal { display: grid; gap: 18px; background: var(--glass-fill-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+.point-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+
+.payment-period-list { display: grid; gap: 9px; }
+.payment-period-indicator { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--brand-magenta) 25%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--brand-magenta) 7%, var(--surface)); }
+.payment-period-date { display: flex; align-items: center; gap: 7px; }
+.payment-period-date > strong:last-child { margin-left: auto; }
+.payment-period-indicator small { color: var(--text-muted); }
+.payment-period-indicator.is-compact { padding: 9px 10px; font-size: .88rem; }
+.payment-period-summary h2 { margin-bottom: 13px; }
+
+@media (max-width: 1100px) {
+  .points-gallery-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .points-gallery-filters > .eyebrow { grid-column: 1 / -1; }
+  .points-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .extra-point-fields, .points-gallery-filters, .points-gallery-grid, .point-detail-grid { grid-template-columns: 1fr; }
+  .payments-page { border-radius: 14px; padding: 12px; }
+}
 
 .manager-shifts-card .list-toolbar { display: grid; grid-template-columns: minmax(220px, 320px) 1fr auto; align-items: center; }
 .manager-shifts-card .list-count { justify-self: center; }

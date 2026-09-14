@@ -29,6 +29,13 @@ export const AuthSessionSchema = z.object({ accessToken: z.string(), user: AuthU
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
 
 export const EvidenceStatusSchema = z.enum(["AVAILABLE", "PURGE_PENDING", "PURGED", "MISSING_LEGACY"]);
+export const EarningsKindSchema = z.enum(["PRIMARY", "EXTRA"]);
+export const PaymentPeriodSchema = z.object({
+  referenceStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  referenceEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  paymentDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+});
+export type PaymentPeriod = z.infer<typeof PaymentPeriodSchema>;
 export const EvidenceSchema = z.object({
   id: z.string(), originalName: z.string(), mimeType: z.string().optional(), sizeBytes: z.number().optional(),
   sha256: z.string().nullable().optional(), status: EvidenceStatusSchema, purgedAt: z.string().nullable().optional()
@@ -83,7 +90,13 @@ export const ShiftSchema = z.object({
   startValueFormatted: z.string(), endValueFormatted: z.string().nullable(), grossAmountFormatted: z.string().nullable(),
   payoutAmountFormatted: z.string().nullable(), negativeJustification: z.string().nullable(), notes: z.string().nullable(),
   chatterVerifiedAt: z.string().nullable().optional(), reviewRevision: z.number().int().positive().optional(),
-  earnings: z.object({ amountFormatted: z.string(), status: z.enum(["PENDING", "PAID"]), paidAt: z.string().nullable() }).nullable().optional()
+  earnings: z.object({
+    amountFormatted: z.string(), status: z.enum(["PENDING", "PAID"]), paidAt: z.string().nullable(),
+    kind: EarningsKindSchema.optional(), payoutPercentage: z.number().int().min(1).max(100).optional(), verifiedAt: z.string().nullable().optional()
+  }).nullable().optional(),
+  earningKind: EarningsKindSchema.optional(), earningPercentage: z.number().int().min(1).max(100).optional(),
+  confirmationBlocked: z.boolean().optional(), canEdit: z.boolean().optional(),
+  paymentPeriod: PaymentPeriodSchema.optional()
 });
 export type ShiftDto = z.infer<typeof ShiftSchema>;
 

@@ -4,6 +4,7 @@ node_modules
 !.env.example
 dist
 coverage
+apps/api/.data/
 playwright-report
 test-results
 feedback.json

@@ -6,8 +6,10 @@ import {
   daysUntilNextMonday,
   getCurrentWeekHalfOpenRange,
   getMonthRangeInBusinessTz,
+  getPaymentPeriod,
   getWeekRangeInBusinessTz,
   isMondayInBusinessTz,
+  isMondaySameDayVerificationBlocked,
   isSameBusinessDate,
   nowInBusinessTz,
   parseBusinessLocalDateTime
@@ -22,6 +24,28 @@ describe("períodos em America/Sao_Paulo", () => {
       lt: new Date("2026-09-01T03:00:00.000Z")
     });
     expect(getMonthRangeInBusinessTz(1, wednesday).gte).toEqual(new Date("2026-09-01T03:00:00.000Z"));
+  });
+
+  it("bloqueia apenas pontos encerrados na própria segunda-feira", () => {
+    const mondayNow = new Date("2026-08-17T15:00:00.000Z");
+    expect(isMondaySameDayVerificationBlocked(new Date("2026-08-17T12:00:00.000Z"), mondayNow)).toBe(true);
+    expect(isMondaySameDayVerificationBlocked(new Date("2026-08-16T23:59:00.000Z"), mondayNow)).toBe(false);
+    expect(isMondaySameDayVerificationBlocked(new Date("2026-08-17T12:00:00.000Z"), new Date("2026-08-18T03:00:00.000Z"))).toBe(false);
+  });
+
+  it("atribui o trabalho ao ciclo de segunda a domingo pago na segunda seguinte", () => {
+    const expected = {
+      referenceStart: "2026-09-07",
+      referenceEnd: "2026-09-13",
+      paymentDate: "2026-09-14"
+    };
+    expect(getPaymentPeriod(new Date("2026-09-07T03:00:00.000Z"))).toEqual(expected);
+    expect(getPaymentPeriod(new Date("2026-09-14T02:59:59.999Z"))).toEqual(expected);
+    expect(getPaymentPeriod(new Date("2026-09-14T03:00:00.000Z"))).toEqual({
+      referenceStart: "2026-09-14",
+      referenceEnd: "2026-09-20",
+      paymentDate: "2026-09-21"
+    });
   });
 
   it("produz semana de segunda a segunda sem sobreposição", () => {

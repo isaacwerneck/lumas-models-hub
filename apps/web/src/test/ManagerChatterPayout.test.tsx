@@ -7,6 +7,7 @@ import { ManagerChatterDetailPage } from "../pages/ManagerChatterDetailPage";
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
   patch: vi.fn(),
+  put: vi.fn(),
   delete: vi.fn()
 }));
 
@@ -72,6 +73,67 @@ describe("configuração de payout do chatter", () => {
       { payoutPercentage: 35 }
     ));
     await waitFor(() => expect(saveButton).toBeDisabled());
+  });
+
+  it("configura um ponto extra para outro chatter ativo", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/manager/chatters/chatter-1") return Promise.resolve({ data: { chatter: {
+        id: "chatter-1", username: "julia", displayName: "Julia", isActive: true, payoutPercentage: 20,
+        modelTags: [], extraPointRule: null
+      } } });
+      if (url === "/manager/chatters") return Promise.resolve({ data: { items: [
+        { id: "chatter-1", displayName: "Julia" }, { id: "chatter-2", displayName: "Bernardo" }
+      ] } });
+      if (url.includes("/shifts")) return Promise.resolve({ data: { items: [], pagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 } } });
+      if (url.includes("/payments")) return Promise.resolve({ data: { items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 1 } } });
+      return Promise.resolve({ data: { tags: [] } });
+    });
+    apiMocks.put.mockResolvedValue({ data: { rule: { beneficiaryId: "chatter-2", percentage: 5 } } });
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /Ponto extra/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Chatter beneficiário"), { target: { value: "chatter-2" } });
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: /Porcentagem adicional/ }),
+      { target: { value: "5" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Salvar ponto extra" }));
+    await waitFor(() => expect(apiMocks.put).toHaveBeenCalledWith("/manager/chatters/chatter-1/extra-point-rule", {
+      enabled: true, beneficiaryId: "chatter-2", percentage: 5
+    }));
+  });
+
+  it("mostra no perfil do beneficiário o ponto extra com a origem e o valor recebido", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/manager/chatters/chatter-1") return Promise.resolve({ data: { chatter: {
+        id: "chatter-1", username: "julia.chatter", displayName: "Julia Chatter", isActive: true,
+        payoutPercentage: 20, modelTags: [], extraPointRule: null
+      } } });
+      if (url === "/manager/chatters") return Promise.resolve({ data: { items: [
+        { id: "chatter-1", displayName: "Julia Chatter" }, { id: "chatter-2", displayName: "Bernardo" }
+      ] } });
+      if (url.includes("/shifts")) return Promise.resolve({ data: { items: [{
+        id: "shift-extra", isExtraPoint: true, sourceChatter: { id: "chatter-2", displayName: "Bernardo" },
+        modelTag: { id: "tag-1", name: "Annie" }, status: "CLOSED",
+        startedAt: "2026-09-14T12:00:00.000Z", endedAt: "2026-09-14T14:00:00.000Z",
+        startImageUrl: null, endImageUrl: null, startValueFormatted: "R$ 0,00", endValueFormatted: "R$ 1.000,00",
+        grossAmountFormatted: "R$ 1.000,00", payoutAmountFormatted: "R$ 200,00", chatterVerifiedAt: null,
+        negativeJustification: null, notes: null,
+        earnings: { kind: "EXTRA", payoutPercentage: 5, amountFormatted: "R$ 50,00", status: "PENDING", paidAt: null }
+      }], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 } } });
+      if (url.includes("/payments")) return Promise.resolve({ data: { items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 1 } } });
+      return Promise.resolve({ data: { tags: [] } });
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("Ponto extra de Bernardo")).toBeInTheDocument();
+    expect(screen.getByText("Ponto extra (5%)")).toBeInTheDocument();
+    expect(screen.getAllByText("R$ 50,00").length).toBeGreaterThan(0);
+    expect(screen.getByText(/somente leitura neste perfil/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apagar turno" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Observação")).toHaveAttribute("readonly");
   });
 
   it("pede confirmação e permite ao gerente apagar um turno não pago", async () => {

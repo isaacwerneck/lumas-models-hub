@@ -23,6 +23,11 @@ enum EarningsStatus {
   PAID
 }
 
+enum EarningsKind {
+  PRIMARY
+  EXTRA
+}
+
 enum ReconciliationStatus {
   MATCHED
   MISMATCH
@@ -117,6 +122,9 @@ model User {
   reconciliationOverrides ShiftReconciliation[] @relation("ReconciliationOverrideManager")
   worksheetCells      ModelWorksheetCell[] @relation("WorksheetCellEditor")
   paymentReceipts     PaymentReceipt[] @relation("PaymentReceiptUploader")
+  extraPointRule      ExtraPointRule?   @relation("ExtraPointRuleSource")
+  extraPointBenefits  ExtraPointRule[]  @relation("ExtraPointRuleBeneficiary")
+  extraShiftBenefits  Shift[]           @relation("ExtraShiftBeneficiary")
 
   @@index([role])
   @@index([role, deletedAt])
@@ -147,6 +155,20 @@ model ChatterModelTag {
 
   @@unique([chatterId, modelTagId])
   @@index([modelTagId])
+}
+
+model ExtraPointRule {
+  id            String   @id @default(cuid())
+  sourceId      String   @unique
+  beneficiaryId String
+  percentage    Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  source        User     @relation("ExtraPointRuleSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  beneficiary   User     @relation("ExtraPointRuleBeneficiary", fields: [beneficiaryId], references: [id], onDelete: Restrict)
+
+  @@index([beneficiaryId])
 }
 
 model Shift {
@@ -186,6 +208,8 @@ model Shift {
   commissionDivisor    Int?
   payoutPercentage     Int?
   payoutAmountCents    Int?
+  extraBeneficiaryId  String?
+  extraPayoutPercentage Int?
   negativeJustification String?
   notes                String?
   chatterVerifiedAt    DateTime?
@@ -196,7 +220,8 @@ model Shift {
 
   chatter              User        @relation("ChatterShifts", fields: [chatterId], references: [id], onDelete: Restrict)
   modelTag             ModelTag    @relation(fields: [modelTagId], references: [id], onDelete: Restrict)
-  earnings             Earnings?
+  earnings             Earnings[]
+  extraBeneficiary     User?       @relation("ExtraShiftBeneficiary", fields: [extraBeneficiaryId], references: [id], onDelete: Restrict)
   startEvidence        Evidence?   @relation("StartEvidence", fields: [startEvidenceId], references: [id], onDelete: SetNull)
   endEvidence          Evidence?   @relation("EndEvidence", fields: [endEvidenceId], references: [id], onDelete: SetNull)
   reconciliations      ShiftReconciliation[]
@@ -205,13 +230,17 @@ model Shift {
   @@index([modelTagId, status])
   @@index([batchId])
   @@index([modelTagId, startedAt, endedAt])
+  @@index([extraBeneficiaryId])
 }
 
 model Earnings {
   id          String         @id @default(cuid())
   chatterId   String
-  shiftId     String         @unique
+  shiftId     String
   amountCents Int
+  kind        EarningsKind   @default(PRIMARY)
+  payoutPercentage Int            @default(20)
+  verifiedAt  DateTime?
   status      EarningsStatus @default(PENDING)
   paidAt      DateTime?
   paymentId   String?
@@ -221,6 +250,7 @@ model Earnings {
   shift       Shift          @relation(fields: [shiftId], references: [id], onDelete: Cascade)
   payment     PaymentHistory? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
+  @@unique([shiftId, chatterId])
   @@index([chatterId, status])
   @@index([status])
   @@index([paymentId])

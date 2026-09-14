@@ -7,7 +7,8 @@ import { buildRefreshToken, tokenHash } from "../src/modules/auth/auth.service";
 import { env } from "../src/config/env";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../src/services/evidence-cleanup";
 import { createNotifications } from "../src/modules/notifications/notification.service";
-import { businessDateKey, businessTimeLabel } from "../src/utils/time";
+import { businessDateKey, businessTimeLabel, getPaymentPeriod, parseBusinessLocalDateTime } from "../src/utils/time";
+import { purgeOrphanPaymentReceipts } from "../src/modules/payment-receipts/payment-receipt.routes";
 
 const app = buildApp();
 let managerId = "";
@@ -25,6 +26,15 @@ let createdChatterId = "";
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const json = (response: { json(): any }) => response.json();
+const multipartFile = (field: string, filename: string, mimeType: string, content: Buffer) => {
+  const boundary = `lumas-${crypto.randomUUID()}`;
+  const payload = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${field}"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`),
+    content,
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  ]);
+  return { payload, headers: { "content-type": `multipart/form-data; boundary=${boundary}`, "content-length": String(payload.length) } };
+};
 const createTestEvidence = async (uploadedById: string, name: string) => app.prisma.evidence.create({
   data: {
     uploadedById,
@@ -69,7 +79,7 @@ beforeAll(async () => {
   const prisma = app.prisma;
   await prisma.storageDeletionJob.deleteMany(); await prisma.notification.deleteMany(); await prisma.auditLog.deleteMany(); await prisma.chatMessage.deleteMany();
   await prisma.modelWorksheetCell.deleteMany(); await prisma.modelWorksheet.deleteMany(); await prisma.shiftReconciliation.deleteMany(); await prisma.salesStatementImport.deleteMany();
-  await prisma.paymentHistory.deleteMany(); await prisma.paymentReceipt.deleteMany(); await prisma.earnings.deleteMany(); await prisma.shift.deleteMany(); await prisma.evidence.deleteMany();
+  await prisma.paymentHistory.deleteMany(); await prisma.paymentReceipt.deleteMany(); await prisma.earnings.deleteMany(); await prisma.shift.deleteMany(); await prisma.evidence.deleteMany(); await prisma.extraPointRule.deleteMany();
   await prisma.refreshSession.deleteMany(); await prisma.chatterModelTag.deleteMany(); await prisma.modelTag.deleteMany(); await prisma.user.deleteMany();
   const passwordHash = await bcrypt.hash("Password@123", 4);
   const [manager, chatter, other, tag, otherTag] = await prisma.$transaction([
@@ -599,7 +609,7 @@ describe("turnos", () => {
 
     await app.inject({ method: "PATCH", url: `/api/v1/chatter/shifts/${shift.id}`, headers: auth(otherToken), payload: { endValue: "R$ 200,00" } });
     const recalculated = await app.prisma.shift.findUniqueOrThrow({ where: { id: shift.id } });
-    const earnings = await app.prisma.earnings.findUniqueOrThrow({ where: { shiftId: shift.id } });
+    const earnings = await app.prisma.earnings.findFirstOrThrow({ where: { shiftId: shift.id } });
     expect(recalculated.payoutPercentage).toBe(35);
     expect(recalculated.payoutAmountCents).toBe(7_000);
     expect(earnings.amountCents).toBe(7_000);
@@ -665,7 +675,7 @@ describe("turnos", () => {
       createTestEvidence(chatterId, "lote-modelo-a-inicio.webp"),
       createTestEvidence(chatterId, "lote-modelo-b-inicio.webp")
     ]);
-    const startedAt = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+    const startedAt = new Date().toISOString();
     const opened = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start-batch", headers: auth(chatterToken), payload: {
       startedAt, notificationsEnabled: true,
       shifts: [
@@ -689,7 +699,7 @@ describe("turnos", () => {
       createTestEvidence(chatterId, "lote-modelo-b-fim.webp")
     ]);
     const ended = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/end-batch", headers: auth(chatterToken), payload: {
-      endedAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+      endedAt: new Date().toISOString(),
       shifts: json(opened).shifts.map((shift: { id: string; modelTagId: string }, index: number) => ({
         shiftId: shift.id, evidenceId: endEvidence[index].id,
         manualConfirmedValue: shift.modelTagId === tagId ? "R$ 140,00" : "R$ 250,00"
@@ -711,9 +721,10 @@ describe("turnos", () => {
       create: { chatterId: otherChatterId, modelTagId: tagId }, update: {}
     });
     const now = Date.now();
+    const currentDate = businessDateKey(new Date(now));
     const onlineEvidence = await createTestEvidence(otherChatterId, "online-atual.webp");
     const online = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/start", headers: auth(otherToken), payload: {
-      modelTagId: tagId, startedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+      modelTagId: tagId, startedAt: parseBusinessLocalDateTime(currentDate, "00:00")!.toISOString(),
       startEvidenceId: onlineEvidence.id, manualConfirmedValue: "R$ 500,00", notificationsEnabled: true
     } });
     expect(online.statusCode).toBe(201);
@@ -721,9 +732,9 @@ describe("turnos", () => {
     const retroEvidence = await Promise.all([
       createTestEvidence(chatterId, "retro-inicio.webp"), createTestEvidence(chatterId, "retro-fim.webp")
     ]);
+    const retroDate = businessDateKey(new Date(now - 48 * 60 * 60_000));
     const retro = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(chatterToken), payload: {
-      startedAt: new Date(now - 26 * 60 * 60_000).toISOString(),
-      endedAt: new Date(now - 20 * 60 * 60_000).toISOString(),
+      businessDate: retroDate, startedTime: "10:00", endedTime: "16:00",
       shifts: [{ modelTagId: tagId,
         start: { evidenceId: retroEvidence[0].id, manualConfirmedValue: "R$ 100,00" },
         end: { evidenceId: retroEvidence[1].id, manualConfirmedValue: "R$ 160,00" }
@@ -743,7 +754,7 @@ describe("turnos", () => {
       createTestEvidence(chatterId, "sobreposto-inicio.webp"), createTestEvidence(chatterId, "sobreposto-fim.webp")
     ]);
     const overlap = await app.inject({ method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(chatterToken), payload: {
-      startedAt: new Date(now - 90 * 60_000).toISOString(), endedAt: new Date(now - 30 * 60_000).toISOString(),
+      businessDate: currentDate, startedTime: "00:00", endedTime: "00:01",
       shifts: [{ modelTagId: tagId,
         start: { evidenceId: overlapEvidence[0].id, manualConfirmedValue: "R$ 200,00" },
         end: { evidenceId: overlapEvidence[1].id, manualConfirmedValue: "R$ 210,00" }
@@ -802,7 +813,7 @@ describe("turnos", () => {
     await app.prisma.earnings.create({ data: { chatterId, shiftId: paidShift.id, amountCents: 1000, status: "PAID", paidAt: new Date(), paymentId: payment.id } });
     const protectedResponse = await app.inject({ method: "DELETE", url: `/api/v1/manager/shifts/${paidShift.id}`, headers: auth(managerToken) });
     expect(protectedResponse.statusCode).toBe(409);
-    await app.prisma.earnings.delete({ where: { shiftId: paidShift.id } });
+    await app.prisma.earnings.deleteMany({ where: { shiftId: paidShift.id } });
     await app.prisma.paymentHistory.delete({ where: { id: payment.id } });
     await app.prisma.shift.delete({ where: { id: paidShift.id } });
   });
@@ -866,6 +877,7 @@ describe("comprovantes privados", () => {
     const evidence = await createTestEvidence(chatterId, "retry.webp");
     await app.evidenceStorage.put(evidence.storageKey!, Buffer.from("retry-proof"), evidence.mimeType);
     await app.prisma.$transaction((tx) => queueEvidencePurge(tx, [evidence.id]));
+    await app.prisma.storageDeletionJob.update({ where: { evidenceId: evidence.id }, data: { nextAttemptAt: new Date(0) } });
 
     const originalDelete = app.evidenceStorage.delete.bind(app.evidenceStorage);
     app.evidenceStorage.delete = async () => { throw new Error("storage temporarily unavailable"); };
@@ -1023,5 +1035,231 @@ describe("pagamentos, chat, notificações e relatórios", () => {
     });
     expect(r.statusCode).toBe(400);
   });
+  it("processa imagem válida e usa o valor informado quando o OCR não encontra moeda", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64"
+    );
+    const upload = multipartFile("image", "comprovante.png", "image/png", png);
+    const r = await app.inject({
+      method: "POST",
+      url: "/api/v1/ocr/extract?fallbackValue=R%24%20123%2C45",
+      headers: { ...auth(chatterToken), ...upload.headers },
+      payload: upload.payload
+    });
+
+    expect(r.statusCode).toBe(200);
+    expect(json(r)).toMatchObject({
+      detectedValue: "R$ 123,45",
+      detectedCents: 12345,
+      ocrStatus: "READY",
+      evidence: { originalName: "comprovante.png", mimeType: "image/webp" }
+    });
+  });
   it("consulta câmbio ou informa indisponibilidade externa", async () => { const r = await app.inject({ method: "GET", url: "/api/v1/fx/usd-brl", headers: auth(chatterToken) }); expect([200, 502]).toContain(r.statusCode); });
+});
+
+describe("ponto extra, valor inicial zero e galeria gerencial", () => {
+  it("gera ganho adicional independente e expõe o ponto para beneficiário e gerente", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const tag = await app.prisma.modelTag.create({ data: { name: `Modelo Extra ${suffix}` } });
+    await app.prisma.chatterModelTag.create({ data: { chatterId, modelTagId: tag.id } });
+
+    const configured = await app.inject({
+      method: "PUT", url: `/api/v1/manager/chatters/${chatterId}/extra-point-rule`, headers: auth(managerToken),
+      payload: { enabled: true, beneficiaryId: otherChatterId, percentage: 5 }
+    });
+    expect(configured.statusCode).toBe(200);
+
+    const date = businessDateKey(new Date(Date.now() - 48 * 60 * 60_000));
+    const endEvidence = await createTestEvidence(chatterId, `extra-${suffix}.webp`);
+    const created = await app.inject({
+      method: "POST", url: "/api/v1/chatter/shifts/retroactive-batch", headers: auth(chatterToken),
+      payload: {
+        businessDate: date, startedTime: "10:00", endedTime: "11:00",
+        shifts: [{
+          modelTagId: tag.id,
+          start: { manualConfirmedValue: "R$ 0,00" },
+          end: { evidenceId: endEvidence.id, manualConfirmedValue: "R$ 1.000,00" }
+        }]
+      }
+    });
+    expect(created.statusCode).toBe(201);
+    const shiftId = json(created).shifts[0].id as string;
+    const expectedPaymentPeriod = getPaymentPeriod(new Date(json(created).shifts[0].startedAt));
+    const earnings = await app.prisma.earnings.findMany({ where: { shiftId }, orderBy: { amountCents: "desc" } });
+    expect(earnings).toHaveLength(2);
+    expect(earnings.map((item) => ({ chatterId: item.chatterId, kind: item.kind, amount: item.amountCents }))).toEqual([
+      { chatterId, kind: "PRIMARY", amount: 20_000 },
+      { chatterId: otherChatterId, kind: "EXTRA", amount: 5_000 }
+    ]);
+
+    const review = await app.inject({ method: "GET", url: "/api/v1/chatter/payment/review?page=1&pageSize=20", headers: auth(otherToken) });
+    const extra = json(review).items.find((item: { id: string }) => item.id === shiftId);
+    expect(extra).toMatchObject({ earningKind: "EXTRA", earningPercentage: 5, payoutAmountCents: 5_000, canEdit: false, paymentPeriod: expectedPaymentPeriod });
+
+    const beneficiaryProfile = await app.inject({
+      method: "GET",
+      url: `/api/v1/manager/chatters/${otherChatterId}/shifts?page=1&pageSize=20`,
+      headers: auth(managerToken)
+    });
+    expect(beneficiaryProfile.statusCode).toBe(200);
+    expect(json(beneficiaryProfile).items.find((item: { id: string }) => item.id === shiftId)).toMatchObject({
+      isExtraPoint: true,
+      sourceChatter: { id: chatterId },
+      earnings: { kind: "EXTRA", payoutPercentage: 5, amountCents: 5_000, amountFormatted: expect.stringContaining("50,00") }
+    });
+
+    const gallery = await app.inject({ method: "GET", url: `/api/v1/manager/shifts?businessDate=${date}&page=1&pageSize=12`, headers: auth(managerToken) });
+    expect(json(gallery).items.find((item: { id: string }) => item.id === shiftId)).toMatchObject({ paymentPeriod: expectedPaymentPeriod });
+
+    const unfilteredGallery = await app.inject({ method: "GET", url: `/api/v1/manager/shifts?chatterId=${chatterId}&page=1&pageSize=100`, headers: auth(managerToken) });
+    expect(unfilteredGallery.statusCode).toBe(200);
+    expect(json(unfilteredGallery).businessDate).toBeNull();
+    expect(json(unfilteredGallery).items.find((item: { id: string }) => item.id === shiftId)).toMatchObject({ paymentPeriod: expectedPaymentPeriod });
+
+    const beneficiaryTotal = await app.prisma.earnings.aggregate({ where: { chatterId: otherChatterId }, _sum: { amountCents: true } });
+    const chatterList = await app.inject({ method: "GET", url: "/api/v1/manager/chatters?page=1&pageSize=100", headers: auth(managerToken) });
+    expect(json(chatterList).items.find((item: { id: string }) => item.id === otherChatterId)).toMatchObject({
+      totalPayoutCents: beneficiaryTotal._sum.amountCents
+    });
+
+    const balances = await app.inject({ method: "GET", url: "/api/v1/manager/payments/balances?page=1&pageSize=100", headers: auth(managerToken) });
+    const beneficiaryBalance = json(balances).items.find((item: { id: string }) => item.id === otherChatterId);
+    expect(beneficiaryBalance.paymentPeriods).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ...expectedPaymentPeriod, pendingCents: 5_000 })
+    ]));
+  });
+});
+
+describe("planilha colaborativa, conciliação e comprovantes", () => {
+  it("cria, edita, limpa e mantém as dimensões da planilha com controle de acesso", async () => {
+    const privateTag = await app.prisma.modelTag.create({ data: { name: `Private Workspace ${crypto.randomUUID()}` } });
+    const denied = await app.inject({ method: "GET", url: `/api/v1/model-workspaces/${privateTag.id}/sheet`, headers: auth(chatterToken) });
+    expect(denied.statusCode).toBe(403);
+
+    const opened = await app.inject({ method: "GET", url: `/api/v1/model-workspaces/${tagId}/sheet`, headers: auth(chatterToken) });
+    expect(opened.statusCode).toBe(200);
+    expect(json(opened).sheet).toMatchObject({ rowCount: 20, columnCount: 6, cells: [] });
+
+    const written = await app.inject({
+      method: "PATCH", url: `/api/v1/model-workspaces/${tagId}/sheet/cells`, headers: auth(chatterToken),
+      payload: { cells: [{ rowIndex: 1, columnIndex: 2, value: "Conferido", valueType: "TEXT" }] }
+    });
+    expect(written.statusCode).toBe(200);
+    expect(json(written).cells[0]).toMatchObject({ rowIndex: 1, columnIndex: 2, value: "Conferido" });
+
+    const cleared = await app.inject({
+      method: "PATCH", url: `/api/v1/model-workspaces/${tagId}/sheet/cells`, headers: auth(chatterToken),
+      payload: { cells: [{ rowIndex: 1, columnIndex: 2, value: "", valueType: "TEXT" }] }
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(json(cleared).cells[0]).toMatchObject({ deleted: true, updatedById: chatterId });
+
+    const resized = await app.inject({
+      method: "PATCH", url: `/api/v1/model-workspaces/${tagId}/sheet/dimensions`, headers: auth(managerToken),
+      payload: { rowCount: 20, columnCount: 6 }
+    });
+    expect(resized.statusCode).toBe(200);
+    expect(json(resized).sheet).toMatchObject({ rowCount: 20, columnCount: 6 });
+  });
+
+  it("lista, detalha e sobrescreve uma conciliação válida", async () => {
+    const shift = await app.prisma.shift.create({ data: {
+      chatterId, modelTagId: tagId, status: "CLOSED", startedAt: new Date("2026-09-08T13:00:00.000Z"), endedAt: new Date("2026-09-08T14:00:00.000Z"),
+      startValueCents: 0, endValueCents: 10_000, grossAmountCents: 10_000, payoutAmountCents: 2_000, payoutPercentage: 20, commissionDivisor: 5
+    } });
+    await app.prisma.earnings.create({ data: { chatterId, shiftId: shift.id, amountCents: 2_000, payoutPercentage: 20 } });
+    const statementImport = await app.prisma.salesStatementImport.create({ data: {
+      managerId, modelTagId: tagId, originalName: "coverage.xlsx", fileSha256: crypto.randomUUID().replaceAll("-", ""), vendorName: "Chatter Test",
+      coverageStart: shift.startedAt, coverageEnd: shift.endedAt!, rowCount: 1, confirmedRowCount: 1, excludedRowCount: 0,
+      totalSalesCents: 9_000, totalCommissionCents: 9_000, unmatchedRowCount: 0
+    } });
+    const reconciliation = await app.prisma.shiftReconciliation.create({ data: {
+      importId: statementImport.id, shiftId: shift.id, shiftReviewRevision: shift.reviewRevision,
+      statementCommissionCents: 9_000, reportedGrossCents: 10_000, deltaCents: -1_000, matchedRowCount: 1, status: "MISMATCH"
+    } });
+
+    const forbidden = await app.inject({ method: "GET", url: "/api/v1/manager/reconciliations/imports", headers: auth(chatterToken) });
+    expect(forbidden.statusCode).toBe(403);
+    const listed = await app.inject({ method: "GET", url: `/api/v1/manager/reconciliations/imports?modelTagId=${tagId}`, headers: auth(managerToken) });
+    expect(json(listed).items.some((item: { id: string }) => item.id === statementImport.id)).toBe(true);
+    const detailed = await app.inject({ method: "GET", url: `/api/v1/manager/reconciliations/imports/${statementImport.id}`, headers: auth(managerToken) });
+    expect(json(detailed).item.reconciliations[0].id).toBe(reconciliation.id);
+    const missing = await app.inject({ method: "GET", url: "/api/v1/manager/reconciliations/imports/missing", headers: auth(managerToken) });
+    expect(missing.statusCode).toBe(404);
+
+    const overridden = await app.inject({
+      method: "POST", url: `/api/v1/manager/reconciliations/results/${reconciliation.id}/override`, headers: auth(managerToken),
+      payload: { reason: "Conferência manual aprovada pelo gerente" }
+    });
+    expect(overridden.statusCode).toBe(200);
+    expect(json(overridden).reconciliation).toMatchObject({ status: "OVERRIDDEN", overriddenById: managerId });
+
+    const invalidPeriod = await app.inject({
+      method: "POST", url: `/api/v1/manager/reconciliations/import?modelTagId=${tagId}&coverageStart=2026-09-10&coverageEnd=2026-09-01`,
+      headers: auth(managerToken)
+    });
+    expect(invalidPeriod.statusCode).toBe(400);
+    const missingFile = await app.inject({
+      method: "POST", url: `/api/v1/manager/reconciliations/import?modelTagId=${tagId}&coverageStart=2026-09-01&coverageEnd=2026-09-10`,
+      headers: { ...auth(managerToken), "content-type": "multipart/form-data; boundary=empty-boundary" },
+      payload: Buffer.from("--empty-boundary--\r\n")
+    });
+    expect(missingFile.statusCode).toBe(400);
+
+    const importTag = await app.prisma.modelTag.create({ data: { name: `Import Coverage ${crypto.randomUUID()}` } });
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Extrato");
+    sheet.addRow(["Data", "Hora", "Valor da venda", "Sua comissão", "Tipo de entrada", "Forma de pagamento", "ID usuário comprador", "Comprador", "Tipo venda", "Vendedor", "Situação"]);
+    sheet.addRow(["08/09/2026", "13:30", "100,00", "20,00", "Venda", "Pix", "buyer", "Cliente", "Mensagem", "Chatter Test", "Pagamento confirmado"]);
+    const upload = multipartFile("file", "SalesStatement.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Buffer.from(await workbook.xlsx.writeBuffer()));
+    const imported = await app.inject({
+      method: "POST",
+      url: `/api/v1/manager/reconciliations/import?modelTagId=${importTag.id}&coverageStart=2026-09-08&coverageEnd=2026-09-08`,
+      headers: { ...auth(managerToken), ...upload.headers },
+      payload: upload.payload
+    });
+    expect(imported.statusCode).toBe(201);
+    expect(json(imported).statementImport).toMatchObject({ modelTagId: importTag.id, unmatchedRowCount: 1 });
+  });
+
+  it("protege, entrega e remove comprovantes órfãos", async () => {
+    const forbiddenUpload = await app.inject({ method: "POST", url: "/api/v1/manager/payment-receipts", headers: auth(chatterToken) });
+    expect(forbiddenUpload.statusCode).toBe(403);
+    const invalidUpload = await app.inject({ method: "POST", url: "/api/v1/manager/payment-receipts", headers: auth(managerToken), payload: {} });
+    expect(invalidUpload.statusCode).toBe(400);
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const validUpload = multipartFile("file", "comprovante.png", "image/png", png);
+    const uploaded = await app.inject({
+      method: "POST", url: "/api/v1/manager/payment-receipts",
+      headers: { ...auth(managerToken), ...validUpload.headers }, payload: validUpload.payload
+    });
+    expect(uploaded.statusCode).toBe(201);
+    expect(json(uploaded).receipt).toMatchObject({ originalName: "comprovante.png", mimeType: "image/png" });
+    const uploadedContent = await app.inject({
+      method: "GET", url: `/api/v1/payment-receipts/${json(uploaded).receipt.id}/content`, headers: auth(managerToken)
+    });
+    expect(uploadedContent.statusCode).toBe(200);
+    const missing = await app.inject({ method: "GET", url: "/api/v1/payment-receipts/missing/content", headers: auth(managerToken) });
+    expect(missing.statusCode).toBe(404);
+
+    const storageKey = `tests/receipt-${crypto.randomUUID()}.pdf`;
+    const buffer = Buffer.from("%PDF-1.4 test receipt");
+    await app.evidenceStorage.put(storageKey, buffer, "application/pdf");
+    const receipt = await app.prisma.paymentReceipt.create({ data: {
+      uploadedById: managerId, storageKey, originalName: "comprovante.pdf", mimeType: "application/pdf",
+      sizeBytes: buffer.length, sha256: crypto.randomUUID().replaceAll("-", ""), createdAt: new Date(Date.now() - 48 * 60 * 60_000)
+    } });
+    const denied = await app.inject({ method: "GET", url: `/api/v1/payment-receipts/${receipt.id}/content`, headers: auth(chatterToken) });
+    expect(denied.statusCode).toBe(403);
+    const delivered = await app.inject({ method: "GET", url: `/api/v1/payment-receipts/${receipt.id}/content`, headers: auth(managerToken) });
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.headers["cache-control"]).toBe("private, no-store");
+    expect(delivered.rawPayload.equals(buffer)).toBe(true);
+
+    expect(await app.prisma.paymentReceipt.count({ where: { id: receipt.id, attachedAt: null, payment: { is: null } } })).toBe(1);
+    expect(await purgeOrphanPaymentReceipts(app)).toBe(1);
+    expect(await app.prisma.paymentReceipt.findUnique({ where: { id: receipt.id } })).toBeNull();
+  });
 });

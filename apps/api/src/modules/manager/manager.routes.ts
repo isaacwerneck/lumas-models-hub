@@ -1,4 +1,4 @@
-import { AuditAction, EarningsStatus, Prisma, ReconciliationStatus, Role, ShiftStatus } from "@prisma/client";
+import { AuditAction, EarningsKind, EarningsStatus, Prisma, ReconciliationStatus, Role, ShiftStatus } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { hashPassword } from "../../utils/password";
@@ -8,9 +8,10 @@ import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pa
 import { auditRequestMetadata } from "../../utils/audit";
 import { processStorageDeletionJobs, queueEvidencePurge } from "../../services/evidence-cleanup";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM, PAYMENTS_UPDATED_EVENT } from "./manager.events";
-import { businessDateKey, businessDateKeysInclusive } from "../../utils/time";
+import { businessDateKey, businessDateKeysInclusive, getPaymentPeriod, getPaymentPeriods, parseBusinessLocalDateTime } from "../../utils/time";
 import { MAX_PAYOUT_PERCENTAGE, MIN_PAYOUT_PERCENTAGE } from "../../utils/payout";
 import { lockShiftChatter } from "../chatter/shift-overlap";
+import { primaryEarning } from "../chatter/earnings";
 
 const ensureManagerRole = (role: Role) => role === Role.MANAGER;
 
@@ -53,6 +54,15 @@ const chatterTagUpdateSchema = z.object({
   modelTagIds: z.array(z.string().min(1)).max(100)
 });
 
+const extraPointRuleSchema = z.object({
+  enabled: z.boolean(),
+  beneficiaryId: z.string().min(1).optional(),
+  percentage: z.number().int().min(MIN_PAYOUT_PERCENTAGE).max(MAX_PAYOUT_PERCENTAGE).optional()
+}).superRefine((value, ctx) => {
+  if (value.enabled && !value.beneficiaryId) ctx.addIssue({ code: "custom", path: ["beneficiaryId"], message: "Selecione o chatter beneficiário." });
+  if (value.enabled && value.percentage === undefined) ctx.addIssue({ code: "custom", path: ["percentage"], message: "Informe o percentual adicional." });
+});
+
 const paySchema = z.object({
   chatterId: z.string().min(1),
   earningIds: z.array(z.string().min(1)).min(1).max(500).optional(),
@@ -87,6 +97,13 @@ const shiftListQuerySchema = paginationSchema.extend({
   modelTagId: z.string().min(1).optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional()
+});
+
+const galleryQuerySchema = paginationSchema.extend({
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  chatterId: z.string().min(1).optional(),
+  modelTagId: z.string().min(1).optional(),
+  status: z.enum(["all", "OPEN", "PENDING", "CONFIRMED", "PAID"]).default("all")
 });
 
 const paymentListQuerySchema = paginationSchema.extend({
@@ -157,28 +174,34 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
 
     const chatterIds = chatters.map((chatter) => chatter.id);
 
-    const shiftSums = await fastify.prisma.shift.groupBy({
-      by: ["chatterId"],
-      where: {
-        chatterId: {
-          in: chatterIds
+    const [shiftSums, earningSums] = await fastify.prisma.$transaction([
+      fastify.prisma.shift.groupBy({
+        by: ["chatterId"],
+        orderBy: { chatterId: "asc" },
+        where: {
+          chatterId: { in: chatterIds },
+          grossAmountCents: { not: null }
         },
-        grossAmountCents: {
-          not: null
-        }
-      },
-      _sum: {
-        grossAmountCents: true,
-        payoutAmountCents: true
-      }
-    });
+        _sum: { grossAmountCents: true }
+      }),
+      fastify.prisma.earnings.groupBy({
+        by: ["chatterId"],
+        orderBy: { chatterId: "asc" },
+        where: { chatterId: { in: chatterIds } },
+        _sum: { amountCents: true }
+      })
+    ]);
+
+    const earningsByChatter = new Map(
+      earningSums.map((item) => [item.chatterId, item._sum?.amountCents ?? 0])
+    );
 
     const sumByChatter = new Map(
       shiftSums.map((item) => [
         item.chatterId,
         {
-          grossAmountCents: item._sum.grossAmountCents ?? 0,
-          payoutAmountCents: item._sum.payoutAmountCents ?? 0
+          grossAmountCents: item._sum?.grossAmountCents ?? 0,
+          payoutAmountCents: earningsByChatter.get(item.chatterId) ?? 0
         }
       ])
     );
@@ -186,7 +209,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const items = chatters.map((chatter) => {
         const sums = sumByChatter.get(chatter.id) ?? {
           grossAmountCents: 0,
-          payoutAmountCents: 0
+          payoutAmountCents: earningsByChatter.get(chatter.id) ?? 0
         };
 
         return {
@@ -210,6 +233,59 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
     return { chatters: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
+  });
+
+  fastify.get("/shifts", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const query = galleryQuerySchema.parse(request.query);
+    const dayStart = query.businessDate ? parseBusinessLocalDateTime(query.businessDate, "00:00") : null;
+    if (query.businessDate && !dayStart) return reply.code(400).send({ message: "Data inválida." });
+    const dayEnd = dayStart ? new Date(dayStart.getTime() + 24 * 60 * 60_000) : null;
+    const statusWhere: Prisma.ShiftWhereInput = query.status === "OPEN"
+      ? { status: ShiftStatus.OPEN }
+      : query.status === "PENDING"
+        ? { status: ShiftStatus.CLOSED, earnings: { some: { kind: EarningsKind.PRIMARY, status: EarningsStatus.PENDING, verifiedAt: null } } }
+        : query.status === "CONFIRMED"
+          ? { status: ShiftStatus.CLOSED, earnings: { some: { kind: EarningsKind.PRIMARY, status: EarningsStatus.PENDING, verifiedAt: { not: null } } } }
+          : query.status === "PAID"
+            ? { status: ShiftStatus.CLOSED, earnings: { some: { kind: EarningsKind.PRIMARY, status: EarningsStatus.PAID } } }
+            : {};
+    const where: Prisma.ShiftWhereInput = {
+      ...(dayStart && dayEnd ? { startedAt: { gte: dayStart, lt: dayEnd } } : {}),
+      ...(query.chatterId ? { chatterId: query.chatterId } : {}),
+      ...(query.modelTagId ? { modelTagId: query.modelTagId } : {}),
+      ...statusWhere
+    };
+    const [shifts, total] = await fastify.prisma.$transaction([
+      fastify.prisma.shift.findMany({
+        where,
+        include: {
+          chatter: { select: { id: true, displayName: true } },
+          modelTag: { select: { id: true, name: true } }, earnings: true,
+          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } }
+        },
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        ...paginationArgs(query.page, query.pageSize)
+      }),
+      fastify.prisma.shift.count({ where })
+    ]);
+    const items = shifts.map((shift) => {
+      const earning = shift.earnings.find((item) => item.kind === EarningsKind.PRIMARY) ?? null;
+      const state = shift.status === ShiftStatus.OPEN ? "OPEN"
+        : earning?.status === EarningsStatus.PAID ? "PAID"
+        : (earning?.verifiedAt ?? shift.chatterVerifiedAt) ? "CONFIRMED" : "PENDING";
+      return {
+        ...shift, earnings: undefined, state,
+        paymentPeriod: getPaymentPeriod(shift.startedAt),
+        startValueFormatted: centsToBrl(shift.startValueCents),
+        endValueFormatted: shift.endValueCents === null ? null : centsToBrl(shift.endValueCents),
+        grossAmountFormatted: shift.grossAmountCents === null ? null : centsToBrl(shift.grossAmountCents),
+        payoutAmountFormatted: shift.payoutAmountCents === null ? null : centsToBrl(shift.payoutAmountCents)
+      };
+    });
+    return { items, pagination: paginationMeta(query.page, query.pageSize, total), businessDate: query.businessDate ?? null };
   });
 
   fastify.get("/chatters/:userId/history", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -289,12 +365,12 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null,
         negativeJustification: shift.negativeJustification,
         notes: shift.notes,
-        earnings: shift.earnings
+        earnings: primaryEarning(shift.earnings)
           ? {
-              amountCents: shift.earnings.amountCents,
-              amountFormatted: centsToBrl(shift.earnings.amountCents),
-              status: shift.earnings.status,
-              paidAt: shift.earnings.paidAt
+              amountCents: primaryEarning(shift.earnings)!.amountCents,
+              amountFormatted: centsToBrl(primaryEarning(shift.earnings)!.amountCents),
+              status: primaryEarning(shift.earnings)!.status,
+              paidAt: primaryEarning(shift.earnings)!.paidAt
             }
           : null
       })),
@@ -316,11 +392,58 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       where: { id: params.userId, role: Role.CHATTER, deletedAt: null },
       select: {
         id: true, username: true, displayName: true, isActive: true, payoutPercentage: true, createdAt: true,
-        chatterModelTags: { include: { modelTag: { select: { id: true, name: true, isActive: true } } } }
+        chatterModelTags: { include: { modelTag: { select: { id: true, name: true, isActive: true } } } },
+        extraPointRule: { include: { beneficiary: { select: { id: true, displayName: true, isActive: true } } } }
       }
     });
     if (!chatter) return reply.code(404).send({ message: "Chatter não encontrado." });
     return { chatter: { ...chatter, modelTags: chatter.chatterModelTags.map((link) => link.modelTag), chatterModelTags: undefined } };
+  });
+
+  fastify.put("/chatters/:userId/extra-point-rule", { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const authUser = request.user as { role: Role; sub: string };
+    if (!ensureManagerRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a gerentes." });
+    const { userId } = userIdParamsSchema.parse(request.params);
+    const body = extraPointRuleSchema.parse(request.body);
+    const source = await fastify.prisma.user.findFirst({ where: { id: userId, role: Role.CHATTER, deletedAt: null } });
+    if (!source) return reply.code(404).send({ message: "Chatter não encontrado." });
+
+    if (body.enabled) {
+      const beneficiary = await fastify.prisma.user.findFirst({
+        where: { id: body.beneficiaryId!, role: Role.CHATTER, isActive: true, deletedAt: null }
+      });
+      if (!beneficiary || beneficiary.id === source.id) {
+        return reply.code(400).send({ message: "Selecione outro chatter ativo como beneficiário." });
+      }
+      if (source.payoutPercentage + body.percentage! > 100) {
+        return reply.code(400).send({ message: "A porcentagem do chatter somada ao ponto extra não pode ultrapassar 100%." });
+      }
+    }
+
+    const rule = await fastify.prisma.$transaction(async (tx) => {
+      const before = await tx.extraPointRule.findUnique({ where: { sourceId: source.id } });
+      let saved = null;
+      if (body.enabled) {
+        saved = await tx.extraPointRule.upsert({
+            where: { sourceId: source.id },
+            create: { sourceId: source.id, beneficiaryId: body.beneficiaryId!, percentage: body.percentage! },
+            update: { beneficiaryId: body.beneficiaryId!, percentage: body.percentage! },
+            include: { beneficiary: { select: { id: true, displayName: true, isActive: true } } }
+          });
+      } else {
+        await tx.extraPointRule.deleteMany({ where: { sourceId: source.id } });
+      }
+      await tx.auditLog.create({ data: {
+        actorId: authUser.sub, action: AuditAction.USER_UPDATED, targetType: "ExtraPointRule", targetId: source.id,
+        metadata: {
+          before: before ? { beneficiaryId: before.beneficiaryId, percentage: before.percentage } : null,
+          after: saved ? { beneficiaryId: saved.beneficiaryId, percentage: saved.percentage } : null,
+          ...auditRequestMetadata(request)
+        }
+      } });
+      return saved;
+    });
+    return { rule };
   });
 
   fastify.get("/chatters/:userId/shifts", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -329,7 +452,10 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const params = userIdParamsSchema.parse(request.params);
     const query = shiftListQuerySchema.parse(request.query);
     const where: Prisma.ShiftWhereInput = {
-      chatterId: params.userId,
+      OR: [
+        { chatterId: params.userId },
+        { earnings: { some: { chatterId: params.userId } } }
+      ],
       ...(query.status ? { status: query.status } : {}),
       ...(query.modelTagId ? { modelTagId: query.modelTagId } : {}),
       ...(query.search ? { modelTag: { name: { contains: query.search, mode: "insensitive" } } } : {}),
@@ -341,6 +467,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       fastify.prisma.shift.findMany({
         where,
         include: {
+          chatter: { select: { id: true, displayName: true } },
           modelTag: { select: { id: true, name: true } }, earnings: true,
           startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
           endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } }
@@ -353,16 +480,22 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     ]);
     if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
     return {
-      items: items.map((shift) => ({
-        ...shift,
-        startValueFormatted: centsToBrl(shift.startValueCents),
-        endValueFormatted: shift.endValueCents === null ? null : centsToBrl(shift.endValueCents),
-        grossAmountFormatted: shift.grossAmountCents === null ? null : centsToBrl(shift.grossAmountCents),
-        payoutAmountFormatted: shift.payoutAmountCents === null ? null : centsToBrl(shift.payoutAmountCents),
-        earnings: shift.earnings
-          ? { ...shift.earnings, amountFormatted: centsToBrl(shift.earnings.amountCents) }
-          : null
-      })),
+      items: items.map((shift) => {
+        const earning = shift.earnings.find((item) => item.chatterId === params.userId) ?? null;
+        const isExtraPoint = earning?.kind === EarningsKind.EXTRA;
+        return {
+          ...shift,
+          isExtraPoint,
+          sourceChatter: shift.chatter,
+          startValueFormatted: centsToBrl(shift.startValueCents),
+          endValueFormatted: shift.endValueCents === null ? null : centsToBrl(shift.endValueCents),
+          grossAmountFormatted: shift.grossAmountCents === null ? null : centsToBrl(shift.grossAmountCents),
+          payoutAmountFormatted: shift.payoutAmountCents === null ? null : centsToBrl(shift.payoutAmountCents),
+          earnings: earning
+            ? { ...earning, amountFormatted: centsToBrl(earning.amountCents) }
+            : null
+        };
+      }),
       pagination: paginationMeta(query.page, query.pageSize, total)
     };
   });
@@ -381,7 +514,10 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     const [items, total, chatterExists] = await fastify.prisma.$transaction([
       fastify.prisma.paymentHistory.findMany({
         where,
-        include: { manager: { select: { id: true, displayName: true } } },
+        include: {
+          manager: { select: { id: true, displayName: true } },
+          earnings: { select: { shift: { select: { startedAt: true } } } }
+        },
         orderBy: [{ paidAt: "desc" }, { id: "desc" }],
         ...paginationArgs(query.page, query.pageSize)
       }),
@@ -390,7 +526,12 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     ]);
     if (!chatterExists) return reply.code(404).send({ message: "Chatter não encontrado." });
     return {
-      items: items.map((item) => ({ ...item, totalFormatted: centsToBrl(item.totalCents) })),
+      items: items.map((item) => ({
+        ...item,
+        earnings: undefined,
+        paymentPeriods: getPaymentPeriods(item.earnings.map((earning) => earning.shift.startedAt)),
+        totalFormatted: centsToBrl(item.totalCents)
+      })),
       pagination: paginationMeta(query.page, query.pageSize, total)
     };
   });
@@ -476,6 +617,12 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.payoutPercentage !== undefined && (body.role ?? targetUser.role) !== Role.CHATTER) {
       return reply.code(400).send({ message: "A porcentagem de payout só pode ser definida para chatters." });
     }
+    if (body.payoutPercentage !== undefined) {
+      const extraRule = await fastify.prisma.extraPointRule.findUnique({ where: { sourceId: targetUser.id } });
+      if (extraRule && body.payoutPercentage + extraRule.percentage > 100) {
+        return reply.code(400).send({ message: "A porcentagem do chatter somada ao ponto extra não pode ultrapassar 100%." });
+      }
+    }
 
     const data: {
       displayName?: string;
@@ -506,6 +653,9 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.password || body.role !== undefined || body.isActive === false) data.authVersion = { increment: 1 };
 
     const updated = await fastify.prisma.$transaction(async (tx) => {
+      if (body.isActive === false) {
+        await tx.extraPointRule.deleteMany({ where: { OR: [{ sourceId: targetUser.id }, { beneficiaryId: targetUser.id }] } });
+      }
       const user = await tx.user.update({
         where: {
           id: targetUser.id
@@ -698,7 +848,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       }
     });
     if (!shift) return reply.code(404).send({ message: "Turno não encontrado." });
-    if (shift.earnings?.status === EarningsStatus.PAID || shift.earnings?.paymentId) {
+    if (shift.earnings.some((earning) => earning.status === EarningsStatus.PAID || Boolean(earning.paymentId))) {
       return reply.code(409).send({ message: "Turnos já pagos não podem ser apagados." });
     }
     const evidence = [shift.startEvidence, shift.endEvidence].filter((item): item is NonNullable<typeof item> => Boolean(item));
@@ -1020,9 +1170,12 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         id: true,
         chatterId: true,
         amountCents: true,
+        kind: true,
+        verifiedAt: true,
         shift: {
           select: {
             chatterVerifiedAt: true,
+            startedAt: true,
             reviewRevision: true,
             reconciliations: {
               orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -1034,12 +1187,19 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       }
     });
 
-    const balances = new Map<string, { pending: number; verified: number; payable: number; blocked: number; payableIds: string[] }>();
+    type PeriodBalance = ReturnType<typeof getPaymentPeriod> & { pending: number; verified: number; payable: number; blocked: number };
+    type ChatterBalance = { pending: number; verified: number; payable: number; blocked: number; payableIds: string[]; periods: Map<string, PeriodBalance> };
+    const emptyBalance = (): ChatterBalance => ({ pending: 0, verified: 0, payable: 0, blocked: 0, payableIds: [], periods: new Map() });
+    const balances = new Map<string, ChatterBalance>();
     for (const earning of pendingEarnings) {
-      const balance = balances.get(earning.chatterId) ?? { pending: 0, verified: 0, payable: 0, blocked: 0, payableIds: [] };
+      const balance = balances.get(earning.chatterId) ?? emptyBalance();
+      const paymentPeriod = getPaymentPeriod(earning.shift.startedAt);
+      const period = balance.periods.get(paymentPeriod.paymentDate) ?? { ...paymentPeriod, pending: 0, verified: 0, payable: 0, blocked: 0 };
       balance.pending += earning.amountCents;
-      if (earning.shift.chatterVerifiedAt) {
+      period.pending += earning.amountCents;
+      if (earning.verifiedAt ?? (earning.kind === EarningsKind.PRIMARY ? earning.shift.chatterVerifiedAt : null)) {
         balance.verified += earning.amountCents;
+        period.verified += earning.amountCents;
         const reconciliation = earning.shift.reconciliations[0];
         const hasBlockingReconciliation = reconciliation?.shiftReviewRevision === earning.shift.reviewRevision
           && reconciliation.status !== ReconciliationStatus.MATCHED
@@ -1047,16 +1207,19 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         const payable = !hasBlockingReconciliation;
         if (payable) {
           balance.payable += earning.amountCents;
+          period.payable += earning.amountCents;
           balance.payableIds.push(earning.id);
         } else {
           balance.blocked += earning.amountCents;
+          period.blocked += earning.amountCents;
         }
       }
+      balance.periods.set(paymentPeriod.paymentDate, period);
       balances.set(earning.chatterId, balance);
     }
 
     const items = chatters.map((chatter) => {
-        const balance = balances.get(chatter.id) ?? { pending: 0, verified: 0, payable: 0, blocked: 0, payableIds: [] };
+        const balance = balances.get(chatter.id) ?? emptyBalance();
         return {
           id: chatter.id,
           displayName: chatter.displayName,
@@ -1069,7 +1232,20 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
           payableFormatted: centsToBrl(balance.payable),
           blockedCents: balance.blocked,
           blockedFormatted: centsToBrl(balance.blocked),
-          payableEarningIds: balance.payableIds
+          payableEarningIds: balance.payableIds,
+          paymentPeriods: Array.from(balance.periods.values())
+            .sort((first, second) => first.paymentDate.localeCompare(second.paymentDate))
+            .map(({ pending, verified, payable, blocked, ...period }) => ({
+              ...period,
+              pendingCents: pending,
+              pendingFormatted: centsToBrl(pending),
+              verifiedCents: verified,
+              verifiedFormatted: centsToBrl(verified),
+              payableCents: payable,
+              payableFormatted: centsToBrl(payable),
+              blockedCents: blocked,
+              blockedFormatted: centsToBrl(blocked)
+            }))
         };
       });
     return { chatters: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };
@@ -1108,6 +1284,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
           id: true,
           shiftId: true,
           amountCents: true,
+          kind: true,
+          verifiedAt: true,
           shift: {
             select: {
               chatterVerifiedAt: true,
@@ -1127,7 +1305,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         const hasBlockingReconciliation = reconciliation?.shiftReviewRevision === item.shift.reviewRevision
           && reconciliation.status !== ReconciliationStatus.MATCHED
           && reconciliation.status !== ReconciliationStatus.OVERRIDDEN;
-        return Boolean(item.shift.chatterVerifiedAt) && !hasBlockingReconciliation;
+        return Boolean(item.verifiedAt ?? (item.kind === EarningsKind.PRIMARY ? item.shift.chatterVerifiedAt : null)) && !hasBlockingReconciliation;
       });
       const requestedIds = body.earningIds ? new Set(body.earningIds) : null;
       const selected = requestedIds ? eligible.filter((item) => requestedIds.has(item.id)) : eligible;
@@ -1245,7 +1423,8 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
       include: {
         chatter: { select: { id: true, displayName: true } },
         manager: { select: { id: true, displayName: true } },
-        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } }
+        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } },
+        earnings: { select: { shift: { select: { startedAt: true } } } }
       },
       ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
       }),
@@ -1259,6 +1438,7 @@ const managerRoutes: FastifyPluginAsync = async (fastify) => {
         totalCents: item.totalCents,
         totalFormatted: centsToBrl(item.totalCents),
         paidAt: item.paidAt,
+        paymentPeriods: getPaymentPeriods(item.earnings.map((earning) => earning.shift.startedAt)),
         receipt: item.receipt
       }));
     return { history: items, items, pagination: paginationMeta(query.page, isV1 ? query.pageSize : Math.max(total, 1), total) };

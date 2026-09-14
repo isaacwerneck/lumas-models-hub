@@ -1,16 +1,17 @@
-import { AuditAction, EarningsStatus, EvidenceStatus, NotificationType, Prisma, Role, ShiftStatus } from "@prisma/client";
+import { AuditAction, EarningsKind, EarningsStatus, EvidenceStatus, NotificationType, Prisma, Role, ShiftStatus } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
 import { paginationArgs, paginationMeta, paginationSchema } from "../../utils/pagination";
 import { auditRequestMetadata } from "../../utils/audit";
 import { brlStringToCents, centsToBrl, resolveOcrValueCents } from "../../utils/currency";
-import { businessDateKey, getMonthRangeInBusinessTz, isSameBusinessDate, nowInBusinessTz, parseBusinessLocalDateTime } from "../../utils/time";
+import { businessDateKey, getMonthRangeInBusinessTz, getPaymentPeriod, getPaymentPeriods, isMondaySameDayVerificationBlocked, isSameBusinessDate, nowInBusinessTz, parseBusinessLocalDateTime } from "../../utils/time";
 import { calculatePayoutCents } from "../../utils/payout";
 import { ANALYTICS_UPDATED_EVENT, MANAGER_ROOM } from "../manager/manager.events";
 import { queueEvidencePurge } from "../../services/evidence-cleanup";
 import { modelRoomName } from "../chat/chat.shared";
 import { createShiftChatEvent } from "./shift-chat";
+import { primaryEarning, resolveExtraPointSnapshot, syncShiftEarnings } from "./earnings";
 import {
   assertModelsHaveNoOpenShift,
   assertNoShiftOverlap,
@@ -125,14 +126,15 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       include: { earnings: true }
     });
 
-    if (shift?.earnings?.status === EarningsStatus.PAID) {
+    const ownerEarning = shift ? primaryEarning(shift.earnings) : null;
+    if (shift?.earnings.some((earning) => earning.status === EarningsStatus.PAID)) {
       return {
         editable: false,
         message: "Lançamentos de ganho já pago não podem ser editados ou apagados."
       };
     }
 
-    if (shift?.chatterVerifiedAt) {
+    if (shift?.earnings.some((earning) => Boolean(earning.verifiedAt)) || ownerEarning?.verifiedAt || shift?.chatterVerifiedAt) {
       return {
         editable: false,
         message: "Desfaça a confirmação dos honorários antes de editar ou apagar este lançamento."
@@ -140,23 +142,6 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     return { editable: true };
-  };
-
-  const syncEarningsForShift = async (
-    tx: Prisma.TransactionClient,
-    chatterId: string,
-    shiftId: string,
-    payoutAmountCents: number
-  ) => {
-    if (payoutAmountCents > 0) {
-      await tx.earnings.upsert({
-        where: { shiftId },
-        create: { chatterId, shiftId, amountCents: payoutAmountCents },
-        update: { amountCents: payoutAmountCents }
-      });
-    } else {
-      await tx.earnings.deleteMany({ where: { shiftId } });
-    }
   };
 
   fastify.get("/shifts/current", { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -237,44 +222,54 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const authUser = request.user as { sub: string; role: Role };
     if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
     const query = paginationSchema.parse(request.query);
-    const where: Prisma.ShiftWhereInput = {
+    const where: Prisma.EarningsWhereInput = {
       chatterId: authUser.sub,
-      status: ShiftStatus.CLOSED,
-      OR: [
-        { earnings: { is: null } },
-        { earnings: { is: { status: EarningsStatus.PENDING } } }
-      ]
+      status: EarningsStatus.PENDING,
+      shift: { status: ShiftStatus.CLOSED }
     };
-    const [shifts, total] = await fastify.prisma.$transaction([
-      fastify.prisma.shift.findMany({
+    const [earnings, total] = await fastify.prisma.$transaction([
+      fastify.prisma.earnings.findMany({
         where,
         include: {
-          modelTag: { select: { id: true, name: true } },
-          earnings: true,
-          startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
-          endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
-          reconciliations: {
-            include: { statementImport: { select: { id: true, originalName: true, vendorName: true, createdAt: true } } },
-            orderBy: { createdAt: "desc" },
-            take: 10
+          shift: {
+            include: {
+              chatter: { select: { id: true, displayName: true } },
+              modelTag: { select: { id: true, name: true } },
+              startEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+              endEvidence: { select: { id: true, originalName: true, status: true, purgedAt: true, sha256: true } },
+              reconciliations: {
+                include: { statementImport: { select: { id: true, originalName: true, vendorName: true, createdAt: true } } },
+                orderBy: { createdAt: "desc" }, take: 10
+              }
+            }
           }
         },
-        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        orderBy: [{ shift: { startedAt: "desc" } }, { id: "desc" }],
         ...paginationArgs(query.page, query.pageSize)
       }),
-      fastify.prisma.shift.count({ where })
+      fastify.prisma.earnings.count({ where })
     ]);
-    const items = shifts.map((shift) => {
+    const items = earnings.map((earning) => {
+      const shift = earning.shift;
       const reconciliation = shift.reconciliations.find((item) => item.shiftReviewRevision === shift.reviewRevision) ?? null;
       return {
         ...shift,
+        earningId: earning.id,
+        earningKind: earning.kind,
+        earningPercentage: earning.payoutPercentage,
+        sourceChatter: shift.chatter,
+        canEdit: earning.kind === EarningsKind.PRIMARY && shift.chatterId === authUser.sub,
+        chatterVerifiedAt: earning.verifiedAt,
+        confirmationBlocked: !earning.verifiedAt && Boolean(shift.endedAt && isMondaySameDayVerificationBlocked(shift.endedAt)),
+        paymentPeriod: getPaymentPeriod(shift.startedAt),
         reconciliations: undefined,
         reconciliation,
         startValueFormatted: centsToBrl(shift.startValueCents),
         endValueFormatted: shift.endValueCents !== null ? centsToBrl(shift.endValueCents) : null,
         grossAmountFormatted: shift.grossAmountCents !== null ? centsToBrl(shift.grossAmountCents) : null,
-        payoutAmountFormatted: shift.payoutAmountCents !== null ? centsToBrl(shift.payoutAmountCents) : null,
-        earnings: shift.earnings ? { ...shift.earnings, amountFormatted: centsToBrl(shift.earnings.amountCents) } : null
+        payoutAmountCents: earning.amountCents,
+        payoutAmountFormatted: centsToBrl(earning.amountCents),
+        earnings: { ...earning, amountFormatted: centsToBrl(earning.amountCents) }
       };
     });
     return { items, shifts: items, pagination: paginationMeta(query.page, query.pageSize, total) };
@@ -284,41 +279,50 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const authUser = request.user as { sub: string; role: Role };
     if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
     const { shiftId } = shiftParamsSchema.parse(request.params);
-    const shift = await fastify.prisma.shift.findFirst({
-      where: { id: shiftId, chatterId: authUser.sub, status: ShiftStatus.CLOSED },
-      include: { earnings: true }
+    const earning = await fastify.prisma.earnings.findUnique({
+      where: { shiftId_chatterId: { shiftId, chatterId: authUser.sub } },
+      include: { shift: true }
     });
-    if (!shift) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
-    if (shift.earnings?.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
-    if (shift.chatterVerifiedAt) return { shiftId, chatterVerifiedAt: shift.chatterVerifiedAt, reviewRevision: shift.reviewRevision };
+    if (!earning || earning.shift.status !== ShiftStatus.CLOSED) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
+    if (earning.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
+    if (earning.verifiedAt) return { shiftId, chatterVerifiedAt: earning.verifiedAt, reviewRevision: earning.shift.reviewRevision };
+    if (earning.shift.endedAt && isMondaySameDayVerificationBlocked(earning.shift.endedAt)) {
+      return reply.code(409).send({ code: "MONDAY_CONFIRMATION_BLOCKED", message: "Pontos encerrados nesta segunda-feira poderão ser confirmados a partir de terça-feira às 00:00." });
+    }
     const verifiedAt = new Date();
     await fastify.prisma.$transaction([
-      fastify.prisma.shift.update({ where: { id: shift.id }, data: { chatterVerifiedAt: verifiedAt } }),
+      fastify.prisma.earnings.update({ where: { id: earning.id }, data: { verifiedAt } }),
+      ...(earning.kind === EarningsKind.PRIMARY
+        ? [fastify.prisma.shift.update({ where: { id: earning.shift.id }, data: { chatterVerifiedAt: verifiedAt } })]
+        : []),
       fastify.prisma.auditLog.create({ data: {
-        actorId: authUser.sub, action: AuditAction.SHIFT_VERIFIED, targetType: "Shift", targetId: shift.id,
-        metadata: { reviewRevision: shift.reviewRevision, ...auditRequestMetadata(request) }
+        actorId: authUser.sub, action: AuditAction.SHIFT_VERIFIED, targetType: "Earnings", targetId: earning.id,
+        metadata: { shiftId: earning.shift.id, kind: earning.kind, reviewRevision: earning.shift.reviewRevision, ...auditRequestMetadata(request) }
       } })
     ]);
-    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: shift.id });
-    return { shiftId, chatterVerifiedAt: verifiedAt, reviewRevision: shift.reviewRevision };
+    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: earning.shift.id });
+    return { shiftId, chatterVerifiedAt: verifiedAt, reviewRevision: earning.shift.reviewRevision };
   });
 
   fastify.delete("/shifts/:shiftId/verify", { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const authUser = request.user as { sub: string; role: Role };
     if (!ensureChatterRole(authUser.role)) return reply.code(403).send({ message: "Acesso restrito a chatters." });
     const { shiftId } = shiftParamsSchema.parse(request.params);
-    const shift = await fastify.prisma.shift.findFirst({ where: { id: shiftId, chatterId: authUser.sub, status: ShiftStatus.CLOSED }, include: { earnings: true } });
-    if (!shift) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
-    if (shift.earnings?.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
-    if (!shift.chatterVerifiedAt) return { success: true };
+    const earning = await fastify.prisma.earnings.findUnique({ where: { shiftId_chatterId: { shiftId, chatterId: authUser.sub } }, include: { shift: true } });
+    if (!earning || earning.shift.status !== ShiftStatus.CLOSED) return reply.code(404).send({ message: "Lançamento fechado não encontrado." });
+    if (earning.status === EarningsStatus.PAID) return reply.code(409).send({ message: "Este lançamento já foi pago." });
+    if (!earning.verifiedAt) return { success: true };
     await fastify.prisma.$transaction([
-      fastify.prisma.shift.update({ where: { id: shift.id }, data: { chatterVerifiedAt: null } }),
+      fastify.prisma.earnings.update({ where: { id: earning.id }, data: { verifiedAt: null } }),
+      ...(earning.kind === EarningsKind.PRIMARY
+        ? [fastify.prisma.shift.update({ where: { id: earning.shift.id }, data: { chatterVerifiedAt: null } })]
+        : []),
       fastify.prisma.auditLog.create({ data: {
-        actorId: authUser.sub, action: AuditAction.SHIFT_UNVERIFIED, targetType: "Shift", targetId: shift.id,
-        metadata: { reviewRevision: shift.reviewRevision, ...auditRequestMetadata(request) }
+        actorId: authUser.sub, action: AuditAction.SHIFT_UNVERIFIED, targetType: "Earnings", targetId: earning.id,
+        metadata: { shiftId: earning.shift.id, kind: earning.kind, reviewRevision: earning.shift.reviewRevision, ...auditRequestMetadata(request) }
       } })
     ]);
-    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: shift.id });
+    fastify.io.to(MANAGER_ROOM).emit("payments:updated", { chatterId: authUser.sub, shiftId: earning.shift.id });
     return { success: true };
   });
 
@@ -445,7 +449,10 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         }
       });
 
-      await syncEarningsForShift(tx, authUser.sub, shift.id, payoutAmountCents);
+      await syncShiftEarnings(tx, {
+        id: updated.id, chatterId: authUser.sub, grossAmountCents, payoutPercentage, payoutAmountCents,
+        extraBeneficiaryId: updated.extraBeneficiaryId, extraPayoutPercentage: updated.extraPayoutPercentage
+      });
 
       await tx.auditLog.create({
         data: {
@@ -560,8 +567,10 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
 
     const body = startShiftSchema.parse(request.body);
     const isV1 = request.url.startsWith("/api/v1/");
-    if (isV1 && !body.startEvidenceId) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
-    if (!isV1 && !body.startEvidenceId && !body.startImageUrl) return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    const submittedStartCents = body.manualConfirmedValue ? brlStringToCents(body.manualConfirmedValue) : null;
+    if (((isV1 && !body.startEvidenceId) || (!isV1 && !body.startEvidenceId && !body.startImageUrl)) && submittedStartCents !== 0) {
+      return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    }
     if (!body.notificationsEnabled) return reply.code(403).send({ message: "Ative as notificações do navegador nas Preferências antes de abrir o ponto.", code: "NOTIFICATIONS_REQUIRED" });
     const now = nowInBusinessTz().toDate();
     const startedAt = resolveRouteDateTime({
@@ -609,6 +618,9 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         message: "Não foi possível determinar o saldo inicial pela imagem/OCR. Confirme manualmente o valor."
       });
     }
+    if (finalStartValueCents !== 0 && ((isV1 && !body.startEvidenceId) || (!isV1 && !body.startEvidenceId && !body.startImageUrl))) {
+      return reply.code(400).send({ message: "Envie o comprovante inicial antes de iniciar o turno." });
+    }
 
     let result;
     try {
@@ -626,6 +638,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
           })
         : null;
       if (!chatter || !chatterHasTag) throw new Error("CHATTER_TAG_UNAVAILABLE");
+      const extraSnapshot = await resolveExtraPointSnapshot(tx, authUser.sub);
       await assertOpenShiftLimit(tx, authUser.sub, 1);
       await assertModelsHaveNoOpenShift(tx, [body.modelTagId]);
       await assertNoShiftOverlap(tx, { modelTagId: body.modelTagId, startedAt });
@@ -651,7 +664,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         startOriginalAmountCents: body.moneyMetadata?.originalAmountCents ?? finalStartValueCents,
         startFxRate: body.moneyMetadata?.fxRate,
         startFxProvider: body.moneyMetadata?.fxProvider,
-        startFxQuotedAt: body.moneyMetadata?.fxQuotedAt ? new Date(body.moneyMetadata.fxQuotedAt) : null
+        startFxQuotedAt: body.moneyMetadata?.fxQuotedAt ? new Date(body.moneyMetadata.fxQuotedAt) : null,
+        ...extraSnapshot
       }, include: {
         modelTag: {
           select: {
@@ -840,7 +854,10 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         }
       });
 
-      await syncEarningsForShift(tx, authUser.sub, shift.id, payoutAmountCents);
+      await syncShiftEarnings(tx, {
+        id: updatedShift.id, chatterId: authUser.sub, grossAmountCents, payoutPercentage, payoutAmountCents,
+        extraBeneficiaryId: updatedShift.extraBeneficiaryId, extraPayoutPercentage: updatedShift.extraPayoutPercentage
+      });
 
       await tx.auditLog.create({ data: {
         actorId: authUser.sub,
@@ -914,10 +931,14 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const thisMonth = getMonthRangeInBusinessTz();
     const lastMonth = getMonthRangeInBusinessTz(-1);
 
-    const [pendingAgg, lifetimeAgg, thisMonthAgg, lastMonthAgg] = await Promise.all([
+    const [pendingAgg, pendingEarnings, lifetimeAgg, thisMonthAgg, lastMonthAgg] = await Promise.all([
       fastify.prisma.earnings.aggregate({
         where: { chatterId: authUser.sub, status: EarningsStatus.PENDING },
         _sum: { amountCents: true }
+      }),
+      fastify.prisma.earnings.findMany({
+        where: { chatterId: authUser.sub, status: EarningsStatus.PENDING },
+        select: { amountCents: true, shift: { select: { startedAt: true } } }
       }),
       fastify.prisma.paymentHistory.aggregate({
         where: { chatterId: authUser.sub },
@@ -937,10 +958,20 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
     const lifetimePaidCents = lifetimeAgg._sum.totalCents ?? 0;
     const thisMonthPaidCents = thisMonthAgg._sum.totalCents ?? 0;
     const lastMonthPaidCents = lastMonthAgg._sum.totalCents ?? 0;
+    const periodAmounts = new Map<string, number>();
+    for (const earning of pendingEarnings) {
+      const period = getPaymentPeriod(earning.shift.startedAt);
+      periodAmounts.set(period.paymentDate, (periodAmounts.get(period.paymentDate) ?? 0) + earning.amountCents);
+    }
+    const paymentPeriods = getPaymentPeriods(pendingEarnings.map((earning) => earning.shift.startedAt)).map((period) => {
+      const amountCents = periodAmounts.get(period.paymentDate) ?? 0;
+      return { ...period, amountCents, amountFormatted: centsToBrl(amountCents) };
+    });
 
     return {
       pendingCents,
       pendingFormatted: centsToBrl(pendingCents),
+      paymentPeriods,
       lifetimePaidCents,
       lifetimePaidFormatted: centsToBrl(lifetimePaidCents),
       thisMonthPaidCents,
@@ -971,7 +1002,8 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
       orderBy: [{ paidAt: "desc" }, { id: "desc" }],
       include: {
         manager: { select: { id: true, displayName: true } },
-        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } }
+        receipt: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true } },
+        earnings: { select: { shift: { select: { startedAt: true } } } }
       },
       ...(isV1 ? paginationArgs(query.page, query.pageSize) : {})
       }),
@@ -983,6 +1015,7 @@ const chatterRoutes: FastifyPluginAsync = async (fastify) => {
         totalCents: item.totalCents,
         totalFormatted: centsToBrl(item.totalCents),
         paidAt: item.paidAt,
+        paymentPeriods: getPaymentPeriods(item.earnings.map((earning) => earning.shift.startedAt)),
         manager: item.manager,
         receipt: item.receipt
       }));

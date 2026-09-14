@@ -35,6 +35,11 @@ export const formatBusinessDate = (dateKey: string) => {
     .format(new Date(Date.UTC(year, month - 1, day)));
 };
 
+export const formatDateKeyShort = (dateKey: string, includeYear = true) => {
+  const [year, month, day] = dateKey.split("-");
+  return includeYear ? `${day}/${month}/${year}` : `${day}/${month}`;
+};
+
 export const legacyIsoFromLocalFields = (date: string, time: string) => {
   const parsed = new Date(`${date}T${time}:00`);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();

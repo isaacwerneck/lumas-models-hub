@@ -45,22 +45,29 @@ const parseMoneyCents = (value: unknown) => {
 };
 
 const parseOccurredAt = (dateValue: unknown, timeValue: unknown) => {
-  if (dateValue instanceof Date) {
-    const base = dayjs(dateValue).tz(env.TZ);
-    if (timeValue instanceof Date) {
-      const time = dayjs(timeValue).tz(env.TZ);
-      return dayjs.tz(`${base.format("YYYY-MM-DD")}T${time.format("HH:mm:ss")}`, env.TZ).toDate();
-    }
-    const timeText = String(timeValue ?? "00:00:00").trim();
-    return dayjs.tz(`${base.format("YYYY-MM-DD")}T${timeText}`, env.TZ).toDate();
+  let dateKey: string | null = null;
+  if (dateValue instanceof Date) dateKey = dayjs.utc(dateValue).format("YYYY-MM-DD");
+  else {
+    const rawDate = String(dateValue ?? "").trim();
+    const br = rawDate.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    const iso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (br) dateKey = `${br[3]}-${br[2]}-${br[1]}`;
+    else if (iso) dateKey = rawDate;
   }
-  const dateMatch = String(dateValue ?? "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  const timeMatch = String(timeValue ?? "").trim().match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!dateMatch || !timeMatch) return null;
-  const [, day, month, year] = dateMatch;
-  const [, hour, minute, second = "00"] = timeMatch;
-  const parsed = dayjs.tz(`${year}-${month}-${day}T${hour}:${minute}:${second}`, env.TZ);
-  return parsed.isValid() ? parsed.toDate() : null;
+
+  let timeText: string | null = null;
+  if (timeValue instanceof Date) timeText = dayjs.utc(timeValue).format("HH:mm:ss");
+  else if (typeof timeValue === "number" && Number.isFinite(timeValue) && timeValue >= 0 && timeValue < 1) {
+    const seconds = Math.round(timeValue * 86_400) % 86_400;
+    timeText = `${String(Math.floor(seconds / 3600)).padStart(2, "0")}:${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  } else {
+    const match = String(timeValue ?? "").trim().match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (match) timeText = `${match[1]}:${match[2]}:${match[3] ?? "00"}`;
+  }
+
+  if (!dateKey || !timeText) return null;
+  const parsed = dayjs.tz(`${dateKey}T${timeText}`, env.TZ);
+  return parsed.isValid() && parsed.format("YYYY-MM-DD") === dateKey ? parsed.toDate() : null;
 };
 
 const expectedHeaders = [

@@ -14,7 +14,7 @@ describe("ShiftsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("Notification", { permission: "granted" });
-    const startedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const startedAt = new Date().toISOString();
     apiMocks.get.mockImplementation((url: string) => {
       if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }] } });
       if (url === "/chatter/shifts/current") {
@@ -55,7 +55,7 @@ describe("ShiftsPage", () => {
   });
 
   it("mantém as ações de dois pontos em uma barra responsiva própria", async () => {
-    const startedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const startedAt = new Date().toISOString();
     apiMocks.get.mockImplementation((url: string) => {
       if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }, { id: "tag-2", name: "Bella" }] } });
       if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [
@@ -85,6 +85,28 @@ describe("ShiftsPage", () => {
     expect(screen.getByRole("heading", { name: "Lançar turno anterior" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Adicionar segunda modelo/ }));
     expect(screen.getAllByLabelText("Modelo")).toHaveLength(2);
+  });
+
+  it("preenche zero à meia-noite e abre o ponto sem exigir print", async () => {
+    apiMocks.get.mockImplementation((url: string) => {
+      if (url === "/chat/rooms") return Promise.resolve({ data: { rooms: [{ id: "tag-1", name: "Annie" }] } });
+      if (url === "/chatter/shifts/current") return Promise.resolve({ data: { shifts: [], shift: null } });
+      return Promise.reject(new Error(`GET inesperado: ${url}`));
+    });
+    apiMocks.post.mockResolvedValue({ data: { shifts: [] } });
+    render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
+    await screen.findByRole("heading", { name: "Abrir ponto" });
+    fireEvent.change(screen.getByLabelText("Horário"), { target: { value: "00:00" } });
+    await waitFor(() => expect(screen.getByLabelText("Valor do faturamento")).toHaveValue("0,00"));
+    expect(screen.getByText("Valor inicial zero não exige print.")).toBeInTheDocument();
+    const form = screen
+      .getByRole("heading", { name: "Abrir ponto", level: 2 })
+      .closest("form");
+    fireEvent.click(form!.querySelector<HTMLButtonElement>("button[type='submit']")!);
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith("/chatter/shifts/start-batch", expect.objectContaining({
+      startedTime: "00:00",
+      shifts: [expect.not.objectContaining({ evidenceId: expect.anything() })]
+    })));
   });
 
   it("cola imagem no campo ativo sem interceptar a colagem em campos de texto", async () => {
@@ -160,6 +182,7 @@ describe("ShiftsPage", () => {
     render(<MemoryRouter><ToastProvider><ShiftsPage /></ToastProvider></MemoryRouter>);
     await screen.findByRole("heading", { name: "Abrir ponto" });
     fireEvent.click(screen.getByRole("button", { name: "Lançar turno anterior" }));
+    fireEvent.change(screen.getByLabelText("Data"), { target: { value: "2026-09-13" } });
     fireEvent.change(screen.getByLabelText("Entrada"), { target: { value: "10:00" } });
     fireEvent.change(screen.getByLabelText("Saída"), { target: { value: "11:00" } });
     fireEvent.click(screen.getByRole("button", { name: /Adicionar segunda modelo/ }));

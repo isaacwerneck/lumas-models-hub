@@ -17,8 +17,8 @@ export const purgeOrphanPaymentReceipts = async (fastify: FastifyInstance) => {
   for (const receipt of orphans) {
     try {
       await fastify.evidenceStorage.delete(receipt.storageKey);
-      await fastify.prisma.paymentReceipt.deleteMany({ where: { id: receipt.id, attachedAt: null, payment: { is: null } } });
-      removed += 1;
+      const deletion = await fastify.prisma.paymentReceipt.deleteMany({ where: { id: receipt.id, attachedAt: null } });
+      removed += deletion.count;
     } catch (error) {
       fastify.log.warn({ err: error, receiptId: receipt.id }, "Failed to purge orphan payment receipt");
     }

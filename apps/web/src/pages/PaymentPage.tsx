@@ -11,6 +11,8 @@ import { ModalDialog } from "../components/ModalDialog";
 import { formatDateTime } from "../lib/dateTime";
 import { EvidenceLink } from "../components/EvidenceLink";
 import type { EvidenceSummary } from "../types/api";
+import type { PaymentPeriod } from "@lumas/contracts";
+import { PaymentPeriodIndicator } from "../components/PaymentPeriodIndicator";
 
 type PaymentSummary = {
   pendingCents: number;
@@ -21,6 +23,7 @@ type PaymentSummary = {
   thisMonthPaidFormatted: string;
   lastMonthPaidCents: number;
   lastMonthPaidFormatted: string;
+  paymentPeriods?: Array<PaymentPeriod & { amountCents: number; amountFormatted: string }>;
 };
 
 type ReviewShift = {
@@ -35,6 +38,12 @@ type ReviewShift = {
   negativeJustification: string | null;
   notes: string | null;
   chatterVerifiedAt: string | null;
+  earningKind: "PRIMARY" | "EXTRA";
+  earningPercentage: number;
+  sourceChatter: { id: string; displayName: string };
+  canEdit: boolean;
+  confirmationBlocked: boolean;
+  paymentPeriod?: PaymentPeriod;
   startEvidence?: EvidenceSummary | null;
   endEvidence?: EvidenceSummary | null;
   reconciliation?: { status: "MATCHED" | "MISMATCH" | "OUT_OF_RANGE" | "AMBIGUOUS" | "OVERRIDDEN"; deltaCents: number } | null;
@@ -50,6 +59,7 @@ type PaymentRecord = {
   totalFormatted: string;
   paidAt: string;
   manager: { id: string; displayName: string };
+  paymentPeriods?: PaymentPeriod[];
   receipt?: { id: string; originalName: string } | null;
 };
 
@@ -299,6 +309,7 @@ export const PaymentPage = () => {
           <strong>{summary?.lifetimePaidFormatted ?? "R$ 0,00"}</strong>
         </div>
       </div>}
+      {!loading && summary?.paymentPeriods?.length ? <div className="card payment-period-summary"><h2>Próximos pagamentos</h2><div className="payment-period-list">{summary.paymentPeriods.map((period) => <PaymentPeriodIndicator key={period.paymentDate} period={period} amountFormatted={period.amountFormatted} />)}</div></div> : null}
 
       <div className="card table-card" tabIndex={0} aria-label="Histórico de pagamentos">
         <h2>Historico de pagamentos</h2>
@@ -306,6 +317,7 @@ export const PaymentPage = () => {
           <thead>
             <tr>
               <th>Data</th>
+              <th>Referência</th>
               <th>Valor pago</th>
               <th>Gerente</th>
               <th>Comprovante</th>
@@ -315,6 +327,7 @@ export const PaymentPage = () => {
             {history.map((record) => (
               <tr key={record.id}>
                 <td>{formatDateTime(record.paidAt)}</td>
+                <td>{record.paymentPeriods?.map((period) => <PaymentPeriodIndicator key={period.paymentDate} period={period} referenceOnly compact />)}</td>
                 <td>{record.totalFormatted}</td>
                 <td>{record.manager.displayName}</td>
                 <td>{record.receipt ? <PaymentReceiptLink receipt={record.receipt} /> : "—"}</td>
@@ -332,7 +345,7 @@ export const PaymentPage = () => {
           {(review?.shifts ?? []).map((shift) => (
             <article className="review-card" key={shift.id}>
               <header className="review-card-header">
-                <div><span className="review-card-eyebrow">Modelo</span><strong>{shift.modelTag.name}</strong></div>
+                <div><span className="review-card-eyebrow">{shift.earningKind === "EXTRA" ? `Ponto extra de ${shift.sourceChatter.displayName}` : "Modelo"}</span><strong>{shift.modelTag.name}</strong></div>
                 <div className="review-status-cell">
                   <span className={`review-status ${shift.chatterVerifiedAt ? "is-confirmed" : "is-pending"}`}>
                     {shift.chatterVerifiedAt ? <BadgeCheck size={16} /> : <CircleAlert size={16} />}
@@ -341,26 +354,34 @@ export const PaymentPage = () => {
                 </div>
               </header>
               <div className="review-card-main">
+                {shift.paymentPeriod ? <PaymentPeriodIndicator period={shift.paymentPeriod} compact /> : null}
                 <div className="review-time-grid">
                   <div><span>Início</span><strong>{formatDateTime(shift.startedAt)}</strong></div>
                   <div><span>Fim</span><strong>{shift.endedAt ? formatDateTime(shift.endedAt) : "—"}</strong></div>
                 </div>
                 <div className="review-metric-grid">
                   <div><span>Bruto</span><strong>{shift.grossAmountFormatted ?? "—"}</strong></div>
-                  <div><span>Comissão</span><strong>{shift.payoutAmountFormatted ?? "—"}</strong></div>
+                  <div><span>{shift.earningKind === "EXTRA" ? `Comissão extra (${shift.earningPercentage}%)` : "Comissão"}</span><strong>{shift.payoutAmountFormatted ?? "—"}</strong></div>
                   <div><span>MPH</span><strong>{shiftMph(shift) ?? "—"}</strong></div>
                 </div>
                 <div className="review-captures"><span>Capturas</span><div className="evidence-pair"><EvidenceLink evidence={shift.startEvidence} /><EvidenceLink evidence={shift.endEvidence} /></div></div>
               </div>
               <footer className="review-card-footer">
-                <span>{shift.chatterVerifiedAt ? "Você pode reabrir a revisão se precisar corrigir este lançamento." : "Confira dados e capturas antes de confirmar."}</span>
+                {shift.confirmationBlocked ? (
+                  <div className="review-confirmation-lock" id={`confirmation-lock-${shift.id}`} role="status">
+                    <CircleAlert size={17} aria-hidden="true" />
+                    <span><strong>Confirmação disponível amanhã</strong>Pontos encerrados na segunda-feira podem ser confirmados a partir de terça-feira, às 00:00.</span>
+                  </div>
+                ) : <span>{shift.chatterVerifiedAt
+                  ? "Você pode reabrir a revisão se precisar corrigir este lançamento."
+                  : shift.earningKind === "EXTRA" ? "Confira o ponto de origem antes de confirmar seu adicional." : "Confira dados e capturas antes de confirmar."}</span>}
                 <div className="review-actions-cell">
                   <div className="review-actions">
-                    <button type="button" className={shift.chatterVerifiedAt ? "review-reopen-button" : "review-confirm-button"} onClick={() => void toggleVerified(shift)}>
+                    <button type="button" className={shift.chatterVerifiedAt ? "review-reopen-button" : "review-confirm-button"} onClick={() => void toggleVerified(shift)} disabled={shift.confirmationBlocked} aria-describedby={shift.confirmationBlocked ? `confirmation-lock-${shift.id}` : undefined} title={shift.confirmationBlocked ? "Disponível na terça-feira, às 00:00" : undefined}>
                       {shift.chatterVerifiedAt ? <Undo2 size={15} /> : <Check size={16} />}
                       {shift.chatterVerifiedAt ? "Reabrir" : "Confirmar"}
                     </button>
-                    {!shift.chatterVerifiedAt ? <>
+                    {!shift.chatterVerifiedAt && shift.canEdit !== false && shift.earningKind !== "EXTRA" ? <>
                       <button type="button" className="review-icon-button" onClick={() => openShiftEditor(shift)} aria-label={`Editar horário de ${shift.modelTag.name}`} title="Editar horário"><Pencil size={16} /></button>
                       <button type="button" className="review-icon-button is-danger" onClick={() => setDeleteTargetShiftId(shift.id)} disabled={deletingShiftId === shift.id} aria-label={`Apagar horário de ${shift.modelTag.name}`} title="Apagar horário"><Trash2 size={16} /></button>
                     </> : null}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Pencil } from "lucide-react";
-import type { Pagination } from "@lumas/contracts";
+import type { Pagination, PaymentPeriod } from "@lumas/contracts";
 import { api, downloadApiFile } from "../lib/api";
 import { useToast } from "../components/Toast";
 import { getApiErrorMessage } from "../lib/apiError";
@@ -9,9 +9,12 @@ import { ModalDialog } from "../components/ModalDialog";
 import { formatDateTime } from "../lib/dateTime";
 import { EvidenceLink } from "../components/EvidenceLink";
 import type { EvidenceSummary } from "../types/api";
+import { PaymentPeriodIndicator } from "../components/PaymentPeriodIndicator";
 
 type Shift = {
   id: string;
+  isExtraPoint?: boolean;
+  sourceChatter?: { id: string; displayName: string };
   modelTag: { id: string; name: string };
   status: string;
   startedAt: string;
@@ -27,13 +30,14 @@ type Shift = {
   chatterVerifiedAt: string | null;
   negativeJustification: string | null;
   notes: string | null;
-  earnings: { amountFormatted: string; status: string; paidAt: string | null } | null;
+  earnings: { amountFormatted: string; status: string; paidAt: string | null; kind?: "PRIMARY" | "EXTRA"; payoutPercentage?: number } | null;
 };
 
 type Payment = {
   id: string;
   totalFormatted: string;
   paidAt: string;
+  paymentPeriods?: PaymentPeriod[];
   manager: { id: string; displayName: string };
 };
 
@@ -45,6 +49,7 @@ type ChatterDetail = {
   isActive: boolean;
   payoutPercentage: number;
   modelTags: Tag[];
+  extraPointRule: { percentage: number; beneficiary: { id: string; displayName: string; isActive: boolean } } | null;
 };
 
 
@@ -66,6 +71,11 @@ export const ManagerChatterDetailPage = () => {
   const [deletingShift, setDeletingShift] = useState(false);
   const [payoutDraft, setPayoutDraft] = useState("20");
   const [savingPayout, setSavingPayout] = useState(false);
+  const [activeChatters, setActiveChatters] = useState<Array<{ id: string; displayName: string }>>([]);
+  const [extraEnabled, setExtraEnabled] = useState(false);
+  const [extraPercentage, setExtraPercentage] = useState("5");
+  const [extraBeneficiaryId, setExtraBeneficiaryId] = useState("");
+  const [savingExtra, setSavingExtra] = useState(false);
   const [editNameOpen, setEditNameOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -81,11 +91,12 @@ export const ManagerChatterDetailPage = () => {
   const PAGE_SIZE = 10;
 
   const loadData = async () => {
-    const [detailResponse, shiftsResponse, paymentsResponse, tagsResponse] = await Promise.all([
+    const [detailResponse, shiftsResponse, paymentsResponse, tagsResponse, chattersResponse] = await Promise.all([
       api.get(`/manager/chatters/${chatterId}`),
       api.get(`/manager/chatters/${chatterId}/shifts`, { params: { page, pageSize: PAGE_SIZE, search: debouncedSearch || undefined } }),
       api.get(`/manager/chatters/${chatterId}/payments`, { params: { page: 1, pageSize: 20 } }),
-      api.get("/manager/tags")
+      api.get("/manager/tags"),
+      api.get("/manager/chatters", { params: { page: 1, pageSize: 100, status: "active" } })
     ]);
     const data = detailResponse.data.chatter;
     setChatter(data);
@@ -95,6 +106,10 @@ export const ManagerChatterDetailPage = () => {
     setAllTags(tagsResponse.data.tags);
     setSelectedTags(data.modelTags.map((tag: Tag) => tag.id));
     setPayoutDraft(String(data.payoutPercentage ?? 20));
+    setActiveChatters((chattersResponse.data.items ?? []).filter((item: { id: string }) => item.id !== chatterId));
+    setExtraEnabled(Boolean(data.extraPointRule));
+    setExtraPercentage(String(data.extraPointRule?.percentage ?? 5));
+    setExtraBeneficiaryId(data.extraPointRule?.beneficiary.id ?? "");
   };
 
   useEffect(() => {
@@ -175,6 +190,32 @@ export const ManagerChatterDetailPage = () => {
       toast.error(getApiErrorMessage(requestError, "Não foi possível atualizar o payout."));
     } finally {
       setSavingPayout(false);
+    }
+  };
+
+  const saveExtraPoint = async () => {
+    if (!chatterId || !chatter) return;
+    const percentage = Number(extraPercentage);
+    if (extraEnabled && (!extraBeneficiaryId || !Number.isInteger(percentage) || percentage < 1 || percentage > 100)) {
+      toast.error("Selecione um chatter e informe uma porcentagem inteira entre 1% e 100%.");
+      return;
+    }
+    if (extraEnabled && chatter.payoutPercentage + percentage > 100) {
+      toast.error("A porcentagem normal somada ao ponto extra não pode ultrapassar 100%.");
+      return;
+    }
+    setSavingExtra(true);
+    try {
+      await api.put(`/manager/chatters/${chatterId}/extra-point-rule`, {
+        enabled: extraEnabled,
+        ...(extraEnabled ? { beneficiaryId: extraBeneficiaryId, percentage } : {})
+      });
+      await loadData();
+      toast.success(extraEnabled ? "Ponto extra atualizado." : "Ponto extra desativado.");
+    } catch (requestError: unknown) {
+      toast.error(getApiErrorMessage(requestError, "Não foi possível atualizar o ponto extra."));
+    } finally {
+      setSavingExtra(false);
     }
   };
 
@@ -347,6 +388,20 @@ export const ManagerChatterDetailPage = () => {
         <button className="primary-button" type="submit" disabled={!payoutDirty || savingPayout}>
           {savingPayout ? "Salvando…" : "Salvar payout"}
         </button>
+        <div className="extra-point-settings">
+          <label className="toggle-row" htmlFor="extra-point-enabled">
+            <span><strong>Ponto extra</strong><small className="field-hint">Destine uma porcentagem adicional dos próximos pontos a outro chatter.</small></span>
+            <input id="extra-point-enabled" type="checkbox" checked={extraEnabled} onChange={(event) => setExtraEnabled(event.target.checked)} />
+          </label>
+          {extraEnabled ? <div className="extra-point-fields">
+            <label>Chatter beneficiário<select value={extraBeneficiaryId} onChange={(event) => setExtraBeneficiaryId(event.target.value)} required>
+              <option value="">Selecione…</option>
+              {activeChatters.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+            </select></label>
+            <label>Porcentagem adicional<div className="percentage-field"><input type="number" min={1} max={Math.max(1, 100 - chatter.payoutPercentage)} step={1} value={extraPercentage} onChange={(event) => setExtraPercentage(event.target.value)} /><span aria-hidden="true">%</span></div></label>
+          </div> : null}
+          <button className="secondary-button" type="button" onClick={() => void saveExtraPoint()} disabled={savingExtra || (extraEnabled && (!extraBeneficiaryId || !extraPercentage))}>{savingExtra ? "Salvando…" : "Salvar ponto extra"}</button>
+        </div>
       </form>
 
       <div className="card form-grid">
@@ -413,8 +468,8 @@ export const ManagerChatterDetailPage = () => {
         </form>
       </ModalDialog>
 
-      <div className="card table-card manager-shifts-card" tabIndex={0} aria-label="Turnos do chatter">
-        <h2>Horas subidas (turnos)</h2>
+      <div className="card table-card manager-shifts-card" tabIndex={0} aria-label="Pontos do chatter">
+        <h2>Pontos registrados</h2>
         <div className="list-toolbar">
           <input
             type="search"
@@ -427,7 +482,7 @@ export const ManagerChatterDetailPage = () => {
             className="search-input"
           />
           <span className="list-count">
-            {shiftPagination.total} {shiftPagination.total === 1 ? "turno" : "turnos"}
+            {shiftPagination.total} {shiftPagination.total === 1 ? "ponto" : "pontos"}
           </span>
           <button className="secondary-button" type="button" onClick={() => void downloadApiFile(
             "/manager/reports/shifts.xlsx",
@@ -440,7 +495,9 @@ export const ManagerChatterDetailPage = () => {
             <article className="manager-shift-card" key={shift.id}>
               <header className="manager-shift-header">
                 <div className="manager-shift-identity">
-                  <span className="manager-shift-label">Modelo</span>
+                  <span className="manager-shift-label">
+                    {shift.isExtraPoint && shift.sourceChatter ? `Ponto extra de ${shift.sourceChatter.displayName}` : "Modelo"}
+                  </span>
                   <strong>{shift.modelTag.name}</strong>
                 </div>
                 <div className="manager-shift-period" aria-label="Período do turno">
@@ -465,7 +522,10 @@ export const ManagerChatterDetailPage = () => {
                   <div><span>Valor inicial</span><strong>{shift.startValueFormatted}</strong></div>
                   <div><span>Valor final</span><strong>{shift.endValueFormatted ?? "—"}</strong></div>
                   <div><span>Bruto</span><strong>{shift.grossAmountFormatted ?? "—"}</strong></div>
-                  <div className="manager-shift-payout"><span>Payout</span><strong>{shift.payoutAmountFormatted ?? "—"}</strong></div>
+                  <div className="manager-shift-payout">
+                    <span>{shift.isExtraPoint ? `Ponto extra${shift.earnings?.payoutPercentage ? ` (${shift.earnings.payoutPercentage}%)` : ""}` : "Payout"}</span>
+                    <strong>{shift.isExtraPoint ? (shift.earnings?.amountFormatted ?? "—") : (shift.payoutAmountFormatted ?? "—")}</strong>
+                  </div>
                 </section>
 
                 <section className="manager-shift-captures" aria-label="Capturas do turno">
@@ -484,8 +544,9 @@ export const ManagerChatterDetailPage = () => {
                     placeholder="Adicione uma observação opcional"
                     rows={3}
                     maxLength={500}
+                    readOnly={shift.isExtraPoint}
                   />
-                  {(notesDraft[shift.id] ?? shift.notes ?? "") !== (shift.notes ?? "") ? (
+                  {!shift.isExtraPoint && (notesDraft[shift.id] ?? shift.notes ?? "") !== (shift.notes ?? "") ? (
                     <button
                       type="button"
                       className="secondary-button"
@@ -495,7 +556,7 @@ export const ManagerChatterDetailPage = () => {
                       {savingNotesId === shift.id ? "Salvando..." : "Salvar observação"}
                     </button>
                   ) : null}
-                  <button
+                  {!shift.isExtraPoint ? <button
                     type="button"
                     className="danger-button manager-delete-shift"
                     disabled={shift.earnings?.status === "PAID"}
@@ -503,14 +564,14 @@ export const ManagerChatterDetailPage = () => {
                     onClick={() => setShiftToDelete(shift)}
                   >
                     Apagar turno
-                  </button>
+                  </button> : <small className="field-hint">Este ponto veio do trabalho de {shift.sourceChatter?.displayName} e é somente leitura neste perfil.</small>}
                 </section>
               </div>
             </article>
           ))}
         </div>
           {shifts.length === 0 ? (
-            <p className="empty-hint">{search ? "Nenhum turno encontrado com essa busca." : "Nenhum turno registrado."}</p>
+            <p className="empty-hint">{search ? "Nenhum ponto encontrado com essa busca." : "Nenhum ponto registrado."}</p>
           ) : null}
           {totalPages > 1 ? (
             <div className="pagination">
@@ -553,6 +614,7 @@ export const ManagerChatterDetailPage = () => {
           <thead>
             <tr>
               <th>Data</th>
+              <th>Referência</th>
               <th>Valor</th>
               <th>Gerente</th>
             </tr>
@@ -561,6 +623,7 @@ export const ManagerChatterDetailPage = () => {
             {payments.map((payment) => (
               <tr key={payment.id}>
                 <td>{formatDateTime(payment.paidAt)}</td>
+                <td>{payment.paymentPeriods?.map((period) => <PaymentPeriodIndicator key={period.paymentDate} period={period} referenceOnly compact />) ?? "—"}</td>
                 <td>{payment.totalFormatted}</td>
                 <td>{payment.manager.displayName}</td>
               </tr>

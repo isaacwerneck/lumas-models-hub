@@ -64,6 +64,35 @@ export const isMondayInBusinessTz = (referenceDate?: Date) => {
   return ref.day() === 1;
 };
 
+export const isMondaySameDayVerificationBlocked = (endedAt: Date, referenceDate = new Date()) => {
+  const now = dayjs(referenceDate).tz(env.TZ);
+  return now.day() === 1 && dayjs(endedAt).tz(env.TZ).format("YYYY-MM-DD") === now.format("YYYY-MM-DD");
+};
+
+export type PaymentPeriod = {
+  referenceStart: string;
+  referenceEnd: string;
+  paymentDate: string;
+};
+
+export const getPaymentPeriod = (workedAt: Date): PaymentPeriod => {
+  const workedDay = dayjs(workedAt).tz(env.TZ).startOf("day");
+  const mondayOffset = (workedDay.day() + 6) % 7;
+  const referenceStart = workedDay.subtract(mondayOffset, "day");
+  return {
+    referenceStart: referenceStart.format("YYYY-MM-DD"),
+    referenceEnd: referenceStart.add(6, "day").format("YYYY-MM-DD"),
+    paymentDate: referenceStart.add(7, "day").format("YYYY-MM-DD")
+  };
+};
+
+export const getPaymentPeriods = (workedDates: Date[]) => Array.from(
+  new Map(workedDates.map((workedAt) => {
+    const period = getPaymentPeriod(workedAt);
+    return [period.paymentDate, period] as const;
+  })).values()
+).sort((first, second) => first.paymentDate.localeCompare(second.paymentDate));
+
 export const daysUntilNextMonday = (referenceDate?: Date) => {
   const ref = referenceDate ? dayjs(referenceDate).tz(env.TZ) : nowInBusinessTz();
   const day = ref.day();

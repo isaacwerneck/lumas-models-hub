@@ -56,17 +56,18 @@ const TimeCard = ({ title, summary, onUseNow, children }: { title: string; summa
 
 type ValueFieldsProps = {
   id: string; label: string; value: EvidenceDraft; active: boolean; onActivate: () => void;
-  onFile: (file: File) => void; onChange: (patch: Partial<EvidenceDraft>) => void;
+  onFile: (file: File) => void; onChange: (patch: Partial<EvidenceDraft>) => void; evidenceOptional?: boolean;
 };
-const ValueFields = ({ id, label, value, active, onActivate, onFile, onChange }: ValueFieldsProps) => (
+const ValueFields = ({ id, label, value, active, onActivate, onFile, onChange, evidenceOptional = false }: ValueFieldsProps) => (
   <div className="shift-value-fields">
-    <ImageDropzone id={`${id}-image`} title={`Print do faturamento (${label})`} fileName={value.imageName}
+    <ImageDropzone id={`${id}-image`} title={`Print do faturamento (${label})${evidenceOptional ? " · opcional para valor zero" : ""}`} fileName={value.imageName}
       status={value.status} error={value.status === "error" ? value.error : null} advisory={value.advisory}
       active={active} onActivate={onActivate} onFile={onFile} />
     <MoneyField inputId={`${id}-value`} value={value.value} onValueChange={(next) => onChange({ value: next, error: "" })}
       currency={value.currency} onCurrencyChange={(currency) => onChange({ currency, error: "" })}
       confidence={value.confidence} reading={value.status === "uploading"}
       error={value.status !== "error" ? value.error : null} />
+    {evidenceOptional ? <small className="field-hint zero-evidence-hint">Valor inicial zero não exige print.</small> : null}
   </div>
 );
 
@@ -101,6 +102,14 @@ export const ShiftsPage = () => {
   const now = getBusinessDateTimeParts(clock);
 
   useEffect(() => { const timer = window.setInterval(() => setClock(new Date()), 30_000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    if (liveTime !== "00:00") return;
+    setLiveDrafts((current) => current.map((draft) => ({ ...draft, start: { ...draft.start, value: "0,00", error: "" } })));
+  }, [liveTime]);
+  useEffect(() => {
+    if (retroStartTime !== "00:00") return;
+    setRetroDrafts((current) => current.map((draft) => ({ ...draft, start: { ...draft.start, value: "0,00", error: "" } })));
+  }, [retroStartTime]);
 
   const extractWithOcr = useCallback(async (file: File) => {
     const formData = new FormData(); formData.append("image", file);
@@ -175,7 +184,7 @@ export const ShiftsPage = () => {
   }, []);
   const valuePayload = useCallback(async (draft: EvidenceDraft) => {
     const resolved = await resolveBrlValue(draft);
-    return { evidenceId: draft.evidenceId, ocrConfidence: draft.confidence ?? undefined, ocrDetectedValue: resolved.value, manualConfirmedValue: resolved.value, moneyMetadata: resolved.moneyMetadata };
+    return { ...(draft.evidenceId ? { evidenceId: draft.evidenceId } : {}), ocrConfidence: draft.confidence ?? undefined, ocrDetectedValue: resolved.value, manualConfirmedValue: resolved.value, moneyMetadata: resolved.moneyMetadata };
   }, [resolveBrlValue]);
 
   const draftsFor = (scope: DraftScope) => scope === "live" ? liveDrafts : scope === "retroactive" ? retroDrafts : closingDrafts;
@@ -183,10 +192,12 @@ export const ShiftsPage = () => {
     const drafts = draftsFor(scope); let firstInvalid = ""; let valid = true;
     for (const draft of drafts) for (const side of sides) {
       const evidence = draft[side]; const model = rooms.find((room) => room.id === draft.modelTagId)?.name ?? draft.modelTagId;
+      const parsedValue = parseMoneyInput(evidence.value);
+      const optionalZeroStart = side === "start" && parsedValue === 0;
       let imageError = ""; let valueError = "";
       if (evidence.status === "uploading") imageError = `Aguarde o envio da imagem de ${side === "start" ? "entrada" : "saída"} de ${model}.`;
-      else if (!evidence.evidenceId) imageError = `Envie a imagem de ${side === "start" ? "entrada" : "saída"} de ${model}.`;
-      if (parseMoneyInput(evidence.value) === null) valueError = `Preencha um valor válido para ${model}.`;
+      else if (!evidence.evidenceId && !optionalZeroStart) imageError = `Envie a imagem de ${side === "start" ? "entrada" : "saída"} de ${model}.`;
+      if (parsedValue === null) valueError = `Preencha um valor válido para ${model}.`;
       const error = imageError || valueError; setDraftEvidence(scope, draft.key, side, { error });
       if (error && !firstInvalid) firstInvalid = evidence.evidenceId && !imageError ? `evidence-${scope}-${draft.key}-${side}-value` : `evidence-${scope}-${draft.key}-${side}-image`;
       valid = valid && !error;
@@ -308,7 +319,7 @@ export const ShiftsPage = () => {
     const id = `evidence-${scope}-${draft.key}-${side}`;
     return <ValueFields id={id} label={label} value={draft[side]} active={pasteTarget === `${scope}:${draft.key}:${side}`}
       onActivate={() => setPasteTarget(`${scope}:${draft.key}:${side}`)} onFile={(file) => void applyImage(scope, draft.key, side, file)}
-      onChange={(patch) => setDraftEvidence(scope, draft.key, side, patch)} />;
+      onChange={(patch) => setDraftEvidence(scope, draft.key, side, patch)} evidenceOptional={side === "start" && parseMoneyInput(draft[side].value) === 0} />;
   };
   const formError = workflowError ? <div ref={workflowErrorRef} className="error-box shift-workflow-error" role="alert" tabIndex={-1}>{workflowError}</div> : null;
 

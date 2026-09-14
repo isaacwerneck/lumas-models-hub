@@ -115,7 +115,7 @@ const reconciliationRoutes: FastifyPluginAsync = async (fastify) => {
     const body = overrideSchema.parse(request.body);
     const result = await fastify.prisma.shiftReconciliation.findUnique({ where: { id }, include: { shift: { include: { earnings: true } } } });
     if (!result) return reply.code(404).send({ message: "Conciliação não encontrada." });
-    if (result.shift.earnings?.status === "PAID") return reply.code(409).send({ message: "Um horário já pago não pode ser alterado." });
+    if (result.shift.earnings.some((earning) => earning.status === "PAID")) return reply.code(409).send({ message: "Um horário já pago não pode ser alterado." });
     if (result.shiftReviewRevision !== result.shift.reviewRevision) return reply.code(409).send({ message: "Este resultado ficou desatualizado após a edição do horário. Importe o extrato novamente." });
     const updated = await fastify.prisma.$transaction(async (tx) => {
       const value = await tx.shiftReconciliation.update({ where: { id }, data: {
